@@ -2,17 +2,17 @@ enabled = true;
 
 # Multi-group policy.
 # Each group key is resolved to a GID via getgrnam(3).
-# Use "template" to reference /usr/local/etc/autodo/templates/<name>.conf,
+# Use "profile" to reference /usr/local/etc/autodo/profiles/<name>.conf,
 # or define inline scope/deny blocks.
 groups {
     wheel {
-        template = "all";
+        profile = "all";
     }
     # developers {
-    #     template = "developer";
+    #     profile = "developer";
     # }
     # operators {
-    #     template = "server-admin";
+    #     profile = "server-admin";
     # }
     # restricted {
     #     scope {
@@ -46,4 +46,4 @@ audit {
     log_file = "/var/log/autodo/events.json";
 }
 
-# template_dir = "/usr/local/etc/autodo/templates";
+# profile_dir = "/usr/local/etc/autodo/profiles";

@@ -54,7 +54,7 @@ const AUTODO_GET_POLICY: c_ulong = 0x46084105;
 
 const default_config_path = "/usr/local/etc/autodo/autodo.conf";
 const default_log_path = "/var/log/autodo/events.json";
-const default_template_dir = "/usr/local/etc/autodo/templates";
+const default_profile_dir = "/usr/local/etc/autodo/profiles";
 const dev_path = "/dev/autodo";
 
 const PrivCategory = struct {
@@ -230,7 +230,7 @@ const Config = struct {
     num_categories: usize = 0,
     audit_enabled: bool = true,
     log_file: []const u8 = default_log_path,
-    template_dir: []const u8 = default_template_dir,
+    profile_dir: []const u8 = default_profile_dir,
     all: bool = true,
     groups: [AUTODO_MAX_GROUPS]GroupEntry = undefined,
     num_groups: usize = 0,
@@ -246,9 +246,9 @@ const Config = struct {
     }
 };
 
-fn loadTemplate(template_dir: []const u8, name: []const u8) ?AutodoScope {
+fn loadProfile(profile_dir: []const u8, name: []const u8) ?AutodoScope {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.conf", .{ template_dir, name }) catch return null;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.conf", .{ profile_dir, name }) catch return null;
     // Null-terminate for C API
     if (path.len >= path_buf.len) return null;
     path_buf[path.len] = 0;
@@ -366,9 +366,9 @@ fn loadConfig(path: [*:0]const u8) ?Config {
     }
 
     // Template directory override
-    if (root.lookup("template_dir")) |obj| {
+    if (root.lookup("profile_dir")) |obj| {
         if (obj.toString()) |s| {
-            cfg.template_dir = s;
+            cfg.profile_dir = s;
         }
     }
 
@@ -391,14 +391,14 @@ fn loadConfig(path: [*:0]const u8) ?Config {
                 continue;
             };
 
-            // Determine scope: template reference or inline scope/deny
+            // Determine scope: profile reference or inline scope/deny
             var bitmap: [AUTODO_BITMAP_WORDS]u64 = undefined;
-            if (group_obj.lookup("template")) |tmpl_obj| {
-                if (tmpl_obj.toString()) |tmpl_name| {
-                    if (loadTemplate(cfg.template_dir, tmpl_name)) |scope| {
+            if (group_obj.lookup("profile")) |prof_obj| {
+                if (prof_obj.toString()) |prof_name| {
+                    if (loadProfile(cfg.profile_dir, prof_name)) |scope| {
                         bitmap = scope.as_bitmap;
                     } else {
-                        log(.warn, "template not found: {s}", .{tmpl_name});
+                        log(.warn, "profile not found: {s}", .{prof_name});
                         continue;
                     }
                 } else continue;

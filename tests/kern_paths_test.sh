@@ -11,7 +11,7 @@
 MODULE_DIR="$(atf_get_srcdir)/../src"
 MODULE_PATH="${MODULE_DIR}/mac_do_auto.ko"
 DAEMON_PATH="$(atf_get_srcdir)/../daemon/zig-out/bin/autodo-eventd"
-TEMPLATE_DIR="$(atf_get_srcdir)/../config/templates"
+PROFILE_DIR="$(atf_get_srcdir)/../config/profiles"
 TEST_USER="admin"
 PROTECTED="/tmp/autodo-protected"
 OPEN_TMP="/tmp/autodo-open"
@@ -41,10 +41,10 @@ start_daemon() {
 	TMPCONF=$(mktemp)
 	cat > "${TMPCONF}" <<-EOF
 	enabled = true;
-	groups { wheel { template = "all"; } }
+	groups { wheel { profile = "all"; } }
 	deny { paths = [ "${PROTECTED}" ]; }
 	audit { enabled = false; }
-	template_dir = "${TEMPLATE_DIR}";
+	profile_dir = "${PROFILE_DIR}";
 	EOF
 	"${DAEMON_PATH}" --config="${TMPCONF}" >/dev/null 2>&1 &
 	sleep 1

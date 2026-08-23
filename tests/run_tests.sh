@@ -189,8 +189,8 @@ assert_success "test -r /dev/autodo" "/dev/autodo readable by wheel"
 echo ""
 echo "[11] Multi-group policy"
 DAEMON_PATH="${DAEMON_PATH:-$(dirname "$0")/../daemon/zig-out/bin/autodo-eventd}"
-TEMPLATE_DIR="$(dirname "$0")/../config/templates"
-if [ -x "$DAEMON_PATH" ] && [ -d "$TEMPLATE_DIR" ]; then
+PROFILE_DIR="$(dirname "$0")/../config/profiles"
+if [ -x "$DAEMON_PATH" ] && [ -d "$PROFILE_DIR" ]; then
 	# Restore scope to all before daemon test
 	doas sysctl security.mac.autodo.scope=all >/dev/null
 
@@ -201,14 +201,14 @@ if [ -x "$DAEMON_PATH" ] && [ -d "$TEMPLATE_DIR" ]; then
 	enabled = true;
 	groups {
 	    wheel {
-	        template = "all";
+	        profile = "all";
 	    }
 	}
 	audit {
 	    enabled = true;
 	    log_file = "${TMPLOG}";
 	}
-	template_dir = "${TEMPLATE_DIR}";
+	profile_dir = "${PROFILE_DIR}";
 	TESTCONF
 
 	# Run daemon briefly to push policy
@@ -216,31 +216,31 @@ if [ -x "$DAEMON_PATH" ] && [ -d "$TEMPLATE_DIR" ]; then
 	sleep 1
 
 	# With multi-group policy active (wheel=all), wheel user should have full access
-	assert_success "cat $TEST_FILE" "multi-group: wheel has full access via all template"
+	assert_success "cat $TEST_FILE" "multi-group: wheel has full access via all profile"
 
 	# Kill daemon (runs as root via doas, so pkill it)
 	doas pkill -f autodo-eventd 2>/dev/null || true
 	sleep 1
 
-	# Now test with VFS-only template for wheel
+	# Now test with VFS-only profile for wheel
 	cat > "$TMPCONF" <<-TESTCONF
 	enabled = true;
 	groups {
 	    wheel {
-	        template = "minimal";
+	        profile = "minimal";
 	    }
 	}
 	audit {
 	    enabled = false;
 	}
-	template_dir = "${TEMPLATE_DIR}";
+	profile_dir = "${PROFILE_DIR}";
 	TESTCONF
 
 	doas "$DAEMON_PATH" --config="$TMPCONF" &
 	sleep 1
 
 	# VFS should work
-	assert_success "cat $TEST_FILE" "multi-group: wheel has VFS access via minimal template"
+	assert_success "cat $TEST_FILE" "multi-group: wheel has VFS access via minimal profile"
 
 	# Jail operations should be denied (minimal = vfs only).
 	# Use doas for jail -m since mac_do_auto minimal scope denies
@@ -248,7 +248,7 @@ if [ -x "$DAEMON_PATH" ] && [ -d "$TEMPLATE_DIR" ]; then
 	if [ -n "$FIRST_JAIL" ]; then
 		doas jail -m name="$FIRST_JAIL" mac.autodo=new 2>/dev/null || true
 		assert_fail "jexec $FIRST_JAIL hostname" \
-		    "multi-group: jail denied with minimal template"
+		    "multi-group: jail denied with minimal profile"
 		doas jail -m name="$FIRST_JAIL" mac.autodo=disable 2>/dev/null || true
 	fi
 
@@ -258,7 +258,7 @@ if [ -x "$DAEMON_PATH" ] && [ -d "$TEMPLATE_DIR" ]; then
 	rm -f "$TMPCONF" "$TMPLOG"
 	pass "multi-group daemon tests completed"
 else
-	echo "  SKIP: daemon not built or templates not found"
+	echo "  SKIP: daemon not built or profiles not found"
 fi
 
 # Remove the temporary jail if we created one

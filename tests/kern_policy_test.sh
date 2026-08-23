@@ -1,13 +1,13 @@
 #!/usr/libexec/atf-sh
 #
 # Multi-group policy tests for mac_do_auto.
-# Tests AUTODO_SET_POLICY ioctl via the daemon with templates.
+# Tests AUTODO_SET_POLICY ioctl via the daemon with profiles.
 #
 
 MODULE_DIR="$(atf_get_srcdir)/../src"
 MODULE_PATH="${MODULE_DIR}/mac_do_auto.ko"
 DAEMON_PATH="$(atf_get_srcdir)/../daemon/zig-out/bin/autodo-eventd"
-TEMPLATE_DIR="$(atf_get_srcdir)/../config/templates"
+PROFILE_DIR="$(atf_get_srcdir)/../config/profiles"
 TEST_FILE="/etc/master.passwd"
 TEST_USER="admin"
 
@@ -38,15 +38,15 @@ get_jail() {
 	jls -n name 2>/dev/null | head -1 | sed 's/name=//'
 }
 
-# --- multi-group: wheel with all template ---
+# --- multi-group: wheel with all profile ---
 
-atf_test_case policy_all_template cleanup
-policy_all_template_head() {
-	atf_set "descr" "Multi-group policy with 'all' template grants full access"
+atf_test_case policy_all_profile cleanup
+policy_all_profile_head() {
+	atf_set "descr" "Multi-group policy with 'all' profile grants full access"
 	atf_set "require.user" "root"
 	atf_set "require.progs" "${DAEMON_PATH}"
 }
-policy_all_template_body() {
+policy_all_profile_body() {
 	if [ ! -x "${DAEMON_PATH}" ]; then
 		atf_skip "Daemon not built"
 	fi
@@ -55,9 +55,9 @@ policy_all_template_body() {
 	TMPCONF=$(mktemp)
 	cat > "${TMPCONF}" <<-EOF
 	enabled = true;
-	groups { wheel { template = "all"; } }
+	groups { wheel { profile = "all"; } }
 	audit { enabled = false; }
-	template_dir = "${TEMPLATE_DIR}";
+	profile_dir = "${PROFILE_DIR}";
 	EOF
 
 	"${DAEMON_PATH}" --config="${TMPCONF}" &
@@ -66,26 +66,26 @@ policy_all_template_body() {
 	if ! check_access; then
 		kill_daemon
 		rm -f "${TMPCONF}"
-		atf_fail "wheel should have full access via all template"
+		atf_fail "wheel should have full access via all profile"
 	fi
 
 	kill_daemon
 	rm -f "${TMPCONF}"
 }
-policy_all_template_cleanup() {
+policy_all_profile_cleanup() {
 	kill_daemon
 	unload_module
 }
 
-# --- multi-group: minimal template restricts to vfs ---
+# --- multi-group: minimal profile restricts to vfs ---
 
-atf_test_case policy_minimal_template cleanup
-policy_minimal_template_head() {
-	atf_set "descr" "Minimal template restricts to VFS-only, denies jail ops"
+atf_test_case policy_minimal_profile cleanup
+policy_minimal_profile_head() {
+	atf_set "descr" "Minimal profile restricts to VFS-only, denies jail ops"
 	atf_set "require.user" "root"
 	atf_set "require.progs" "${DAEMON_PATH}"
 }
-policy_minimal_template_body() {
+policy_minimal_profile_body() {
 	JAIL=$(get_jail)
 	if [ -z "${JAIL}" ]; then
 		atf_skip "No jails running"
@@ -99,9 +99,9 @@ policy_minimal_template_body() {
 	TMPCONF=$(mktemp)
 	cat > "${TMPCONF}" <<-EOF
 	enabled = true;
-	groups { wheel { template = "minimal"; } }
+	groups { wheel { profile = "minimal"; } }
 	audit { enabled = false; }
-	template_dir = "${TEMPLATE_DIR}";
+	profile_dir = "${PROFILE_DIR}";
 	EOF
 
 	"${DAEMON_PATH}" --config="${TMPCONF}" &
@@ -111,34 +111,34 @@ policy_minimal_template_body() {
 	if ! check_access; then
 		kill_daemon
 		rm -f "${TMPCONF}"
-		atf_fail "VFS should work with minimal template"
+		atf_fail "VFS should work with minimal profile"
 	fi
 	# Jail should be denied
 	if check_jexec ${JAIL}; then
 		kill_daemon
 		rm -f "${TMPCONF}"
-		atf_fail "Jail should be denied with minimal template"
+		atf_fail "Jail should be denied with minimal profile"
 	fi
 
 	kill_daemon
 	rm -f "${TMPCONF}"
 }
-policy_minimal_template_cleanup() {
+policy_minimal_profile_cleanup() {
 	kill_daemon
 	JAIL=$(get_jail)
 	[ -n "${JAIL}" ] && jail -m name="${JAIL}" mac.autodo=disable 2>/dev/null
 	unload_module
 }
 
-# --- multi-group: developer template denies specific privs ---
+# --- multi-group: developer profile denies specific privs ---
 
-atf_test_case policy_developer_template cleanup
-policy_developer_template_head() {
-	atf_set "descr" "Developer template grants vfs/jail/net/proc, denies KMEM"
+atf_test_case policy_developer_profile cleanup
+policy_developer_profile_head() {
+	atf_set "descr" "Developer profile grants vfs/jail/net/proc, denies KMEM"
 	atf_set "require.user" "root"
 	atf_set "require.progs" "${DAEMON_PATH}"
 }
-policy_developer_template_body() {
+policy_developer_profile_body() {
 	if [ ! -x "${DAEMON_PATH}" ]; then
 		atf_skip "Daemon not built"
 	fi
@@ -147,9 +147,9 @@ policy_developer_template_body() {
 	TMPCONF=$(mktemp)
 	cat > "${TMPCONF}" <<-EOF
 	enabled = true;
-	groups { wheel { template = "developer"; } }
+	groups { wheel { profile = "developer"; } }
 	audit { enabled = false; }
-	template_dir = "${TEMPLATE_DIR}";
+	profile_dir = "${PROFILE_DIR}";
 	EOF
 
 	"${DAEMON_PATH}" --config="${TMPCONF}" &
@@ -159,13 +159,13 @@ policy_developer_template_body() {
 	if ! check_access; then
 		kill_daemon
 		rm -f "${TMPCONF}"
-		atf_fail "VFS should work with developer template"
+		atf_fail "VFS should work with developer profile"
 	fi
 
 	kill_daemon
 	rm -f "${TMPCONF}"
 }
-policy_developer_template_cleanup() {
+policy_developer_profile_cleanup() {
 	kill_daemon
 	unload_module
 }
@@ -193,7 +193,7 @@ policy_inline_body() {
 	    }
 	}
 	audit { enabled = false; }
-	template_dir = "${TEMPLATE_DIR}";
+	profile_dir = "${PROFILE_DIR}";
 	EOF
 
 	"${DAEMON_PATH}" --config="${TMPCONF}" &
@@ -230,9 +230,9 @@ policy_disabled_body() {
 	TMPCONF=$(mktemp)
 	cat > "${TMPCONF}" <<-EOF
 	enabled = false;
-	groups { wheel { template = "all"; } }
+	groups { wheel { profile = "all"; } }
 	audit { enabled = false; }
-	template_dir = "${TEMPLATE_DIR}";
+	profile_dir = "${PROFILE_DIR}";
 	EOF
 
 	"${DAEMON_PATH}" --config="${TMPCONF}" &
@@ -255,9 +255,9 @@ policy_disabled_cleanup() {
 }
 
 atf_init_test_cases() {
-	atf_add_test_case policy_all_template
-	atf_add_test_case policy_minimal_template
-	atf_add_test_case policy_developer_template
+	atf_add_test_case policy_all_profile
+	atf_add_test_case policy_minimal_profile
+	atf_add_test_case policy_developer_profile
 	atf_add_test_case policy_inline
 	atf_add_test_case policy_disabled
 }
