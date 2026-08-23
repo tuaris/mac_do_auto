@@ -75,6 +75,32 @@ module_unload_cleanup() {
 	unload_module
 }
 
+# --- unload veto while /dev/autodo is open ---
+
+atf_test_case unload_vetoed_while_open cleanup
+unload_vetoed_while_open_head() {
+	atf_set "descr" "kldunload fails with EBUSY while /dev/autodo is open"
+	atf_set "require.user" "root"
+}
+unload_vetoed_while_open_body() {
+	load_module
+	exec 9</dev/autodo
+	if kldunload mac_do_auto 2>/dev/null; then
+		exec 9<&-
+		atf_fail "kldunload succeeded while /dev/autodo was open"
+	fi
+	exec 9<&-
+	# Module must still be loaded and functional after the veto.
+	atf_check -s exit:0 kldstat -q -m mac_do_auto
+	atf_check -s exit:0 -o not-empty sysctl -n security.mac.autodo.enabled
+	# Unload must succeed once the device is closed.
+	atf_check -s exit:0 kldunload mac_do_auto
+}
+unload_vetoed_while_open_cleanup() {
+	exec 9<&- 2>/dev/null || true
+	unload_module
+}
+
 # --- sysctl interface ---
 
 atf_test_case sysctl_readable cleanup
@@ -217,6 +243,7 @@ atf_init_test_cases() {
 	atf_add_test_case baseline_denied
 	atf_add_test_case module_load
 	atf_add_test_case module_unload
+	atf_add_test_case unload_vetoed_while_open
 	atf_add_test_case sysctl_readable
 	atf_add_test_case grant_with_module
 	atf_add_test_case deny_after_unload

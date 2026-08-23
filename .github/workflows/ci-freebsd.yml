@@ -1,0 +1,56 @@
+name: FreeBSD kernel tests
+
+on:
+  push:
+    branches: [ master ]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    branches: [ master ]
+    paths-ignore:
+      - '**.md'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Build and test on FreeBSD 15.1
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build and test on FreeBSD
+      uses: vmactions/freebsd-vm@v1
+      with:
+        release: "15.1"
+        usesh: true
+        prepare: |
+          pkg install -y kyua doas zig015
+
+          # Kernel source tree required by bsd.kmod.mk
+          fetch -o /tmp/src.txz \
+            https://download.freebsd.org/releases/amd64/15.1-RELEASE/src.txz
+          tar -C / -xf /tmp/src.txz ./usr/src
+          rm /tmp/src.txz
+
+          # Non-root wheel member expected by the test suite
+          pw useradd -n admin -G wheel -m -s /bin/sh || true
+          printf 'permit nopass root\npermit nopass keepenv :wheel\n' \
+            > /usr/local/etc/doas.conf
+        run: |
+          set -ex
+
+          # Build the kernel module
+          make -C src
+
+          # Build the companion daemon (needed by the policy tests)
+          ZIG=$(command -v zig015 || command -v zig)
+          (cd daemon && "$ZIG" build && "$ZIG" build test)
+
+          # Shell harness: load/unload, sysctls, scope, jails, daemon
+          sh tests/run_tests.sh
+
+          # Full ATF suite (includes load/unload stress cycles)
+          cd tests
+          kyua test
+          kyua report --results-filter=passed,failed,skipped

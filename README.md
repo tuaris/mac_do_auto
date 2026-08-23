@@ -58,6 +58,33 @@ whether the process holds the required privilege, `mac_do_auto` checks if the
 calling process belongs to the authorized group.  If so, it grants the
 privilege — the operation succeeds as if the process were running as root.
 
+## Testing
+
+All tests require a FreeBSD host (not a jail — they load/unload the
+kernel module), root privileges, and a non-root wheel member named
+`admin`:
+
+```sh
+sh tests/run_tests.sh        # shell harness (uses doas)
+cd tests && doas kyua test   # full ATF suite
+```
+
+CI runs the build and both suites on every push/PR via
+`.github/workflows/ci-freebsd.yml` (vmactions/freebsd-vm).
+
+### Boot-path test
+
+`tests/boot_vm_test.sh` covers the loader-preload path that runtime
+tests cannot reach: it installs the module into a stock FreeBSD VM
+image, sets `mac_do_auto_load="YES"`, boots it under bhyve, and verifies
+via the serial console that the kernel reaches multiuser with
+`/dev/autodo` created.  Requires a bhyve-capable host (bare metal or
+nested virtualization exposed):
+
+```sh
+doas sh tests/boot_vm_test.sh
+```
+
 ## License
 
 BSD-2-Clause
