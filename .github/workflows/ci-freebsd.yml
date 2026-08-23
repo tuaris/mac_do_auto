@@ -58,8 +58,11 @@ jobs:
           ZIG=$(command -v zig015 || command -v zig)
           (cd daemon && "$ZIG" build && "$ZIG" build test)
 
-          # Shell harness: load/unload, sysctls, scope, jails, daemon
-          sh tests/run_tests.sh
+          # Shell harness: load/unload, sysctls, scope, jails, daemon.
+          # Must run as the non-root wheel user (its denial assertions
+          # are meaningless as root, which bypasses DAC entirely).
+          chmod -R a+rX .
+          su -m admin -c "cd '$PWD' && sh tests/run_tests.sh"
 
           # Full ATF suite (includes load/unload stress cycles)
           cd tests
