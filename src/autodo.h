@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 Daniel Morante
  *
- * Shared definitions for mac_autodo kernel module and autodo-eventd daemon.
+ * Shared definitions for mac_do_auto kernel module and autodo-eventd daemon.
  */
 
 #ifndef _AUTODO_H_

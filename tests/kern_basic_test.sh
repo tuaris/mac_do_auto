@@ -1,6 +1,6 @@
 #!/usr/libexec/atf-sh
 #
-# Basic mac_autodo kernel module tests.
+# Basic mac_do_auto kernel module tests.
 # Tests module load/unload, sysctl interface, and fundamental grant/deny.
 #
 # All tests run as root (required for kldload/sysctl).
@@ -8,17 +8,17 @@
 #
 
 MODULE_DIR="$(atf_get_srcdir)/../src"
-MODULE_PATH="${MODULE_DIR}/mac_autodo.ko"
+MODULE_PATH="${MODULE_DIR}/mac_do_auto.ko"
 TEST_FILE="/etc/master.passwd"
 TEST_USER="admin"
 
 load_module() {
-	kldstat -q -m mac_autodo 2>/dev/null && return 0
-	kldload "${MODULE_PATH}" || atf_fail "cannot load mac_autodo.ko"
+	kldstat -q -m mac_do_auto 2>/dev/null && return 0
+	kldload "${MODULE_PATH}" || atf_fail "cannot load mac_do_auto.ko"
 }
 
 unload_module() {
-	kldstat -q -m mac_autodo 2>/dev/null && kldunload mac_autodo
+	kldstat -q -m mac_do_auto 2>/dev/null && kldunload mac_do_auto
 	return 0
 }
 
@@ -53,7 +53,7 @@ module_load_head() {
 }
 module_load_body() {
 	load_module
-	atf_check -s exit:0 kldstat -q -m mac_autodo
+	atf_check -s exit:0 kldstat -q -m mac_do_auto
 }
 module_load_cleanup() {
 	unload_module
@@ -68,8 +68,8 @@ module_unload_head() {
 }
 module_unload_body() {
 	load_module
-	atf_check -s exit:0 kldunload mac_autodo
-	atf_check -s exit:1 kldstat -q -m mac_autodo
+	atf_check -s exit:0 kldunload mac_do_auto
+	atf_check -s exit:1 kldstat -q -m mac_do_auto
 }
 module_unload_cleanup() {
 	unload_module
@@ -79,7 +79,7 @@ module_unload_cleanup() {
 
 atf_test_case sysctl_readable cleanup
 sysctl_readable_head() {
-	atf_set "descr" "All mac_autodo sysctls are readable"
+	atf_set "descr" "All mac_do_auto sysctls are readable"
 	atf_set "require.user" "root"
 }
 sysctl_readable_body() {
@@ -123,7 +123,7 @@ deny_after_unload_body() {
 	if ! check_access; then
 		atf_fail "wheel user denied with module loaded"
 	fi
-	kldunload mac_autodo
+	kldunload mac_do_auto
 	if check_access; then
 		atf_fail "wheel user could read ${TEST_FILE} after unload"
 	fi

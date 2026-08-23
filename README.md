@@ -1,4 +1,4 @@
-# mac_autodo
+# mac_do_auto
 
 A FreeBSD MAC policy module that transparently grants privileges to authorized
 users without requiring explicit privilege escalation tools (`mdo`, `sudo`,
@@ -20,7 +20,7 @@ it should not force you to ask permission every single time.
 ```sh
 cd src
 make
-doas kldload ./mac_autodo.ko
+doas kldload ./mac_do_auto.ko
 # You now have implicit root privileges as a wheel member
 cat /etc/master.passwd   # works without mdo/doas/sudo
 ```
@@ -44,7 +44,7 @@ sysctl security.mac.autodo.gid=0
 
 ```sh
 # /boot/loader.conf
-mac_autodo_load="YES"
+mac_do_auto_load="YES"
 
 # /etc/sysctl.conf
 security.mac.autodo.enabled=1
@@ -54,7 +54,7 @@ security.mac.autodo.enabled=1
 
 The module implements the `mac_priv_grant()` MAC framework hook.  When the
 standard DAC (Unix permissions) denies an operation and the kernel checks
-whether the process holds the required privilege, `mac_autodo` checks if the
+whether the process holds the required privilege, `mac_do_auto` checks if the
 calling process belongs to the authorized group.  If so, it grants the
 privilege — the operation succeeds as if the process were running as root.
 

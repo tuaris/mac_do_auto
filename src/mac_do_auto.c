@@ -24,7 +24,7 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  *
- * mac_autodo - Transparent privilege escalation for authorized users.
+ * mac_do_auto - Transparent privilege escalation for authorized users.
  *
  * This MAC policy module grants privileges to processes whose credentials
  * include membership in a configured group (default: wheel/GID 0), without
@@ -293,7 +293,7 @@ static struct timeval autodo_log_lasttime;
 static unsigned	autodo_osd_jail_slot;
 
 SYSCTL_NODE(_security_mac, OID_AUTO, autodo, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
-    "mac_autodo policy controls");
+    "autodo policy controls");
 
 SYSCTL_INT(_security_mac_autodo, OID_AUTO, enabled,
     CTLFLAG_RW | CTLFLAG_MPSAFE, &autodo_enabled, 0,
@@ -323,7 +323,7 @@ SYSCTL_JAIL_PARAM_SYS_SUBNODE(mac, autodo, CTLFLAG_RW,
  * /dev/autodo character device — ring buffer + ioctl interface
  * ---------------------------------------------------------------- */
 
-MALLOC_DEFINE(M_AUTODO, "autodo", "mac_autodo ring buffer");
+MALLOC_DEFINE(M_AUTODO, "autodo", "autodo ring buffer");
 
 static struct mtx	autodo_ring_mtx;
 static struct autodo_event *autodo_ring;
@@ -333,6 +333,7 @@ static unsigned		autodo_ring_count;	/* events available */
 static struct selinfo	autodo_sel;
 static struct cdev	*autodo_cdev;
 static int		autodo_dev_open;	/* single-open flag */
+static int		autodo_dev_dying;	/* set when module is unloading */
 
 static void
 autodo_ring_push(const struct autodo_event *ev)
@@ -380,8 +381,22 @@ autodo_dev_open_f(struct cdev *dev __unused, int oflags __unused,
     int devtype __unused, struct thread *td __unused)
 {
 
-	if (atomic_cmpset_int(&autodo_dev_open, 0, 1) == 0)
+	/*
+	 * The dying check and the open flag are set under the same lock
+	 * the MOD_QUIESCE veto holds, so an open(2) cannot slip in
+	 * between the veto and destroy_dev().
+	 */
+	mtx_lock(&autodo_ring_mtx);
+	if (autodo_dev_dying) {
+		mtx_unlock(&autodo_ring_mtx);
+		return (ENXIO);
+	}
+	if (autodo_dev_open) {
+		mtx_unlock(&autodo_ring_mtx);
 		return (EBUSY);
+	}
+	autodo_dev_open = 1;
+	mtx_unlock(&autodo_ring_mtx);
 	return (0);
 }
 
@@ -390,8 +405,28 @@ autodo_dev_close_f(struct cdev *dev __unused, int fflag __unused,
     int devtype __unused, struct thread *td __unused)
 {
 
+	/* Serialize with the MOD_QUIESCE veto in mac_do_auto_modevent(). */
+	mtx_lock(&autodo_ring_mtx);
 	autodo_dev_open = 0;
+	mtx_unlock(&autodo_ring_mtx);
 	return (0);
+}
+
+/*
+ * Called by destroy_dev() (via devfs) with devmtx held whenever threads
+ * are still inside cdevsw methods during teardown.  Wake any thread
+ * sleeping in read(2) so it can observe autodo_dev_dying and exit,
+ * allowing destroy_dev() to drain si_threadcount and return.
+ */
+static void
+autodo_dev_purge(struct cdev *dev __unused)
+{
+
+	mtx_lock(&autodo_ring_mtx);
+	autodo_dev_dying = 1;
+	wakeup(&autodo_ring_count);
+	mtx_unlock(&autodo_ring_mtx);
+	selwakeup(&autodo_sel);
 }
 
 static int
@@ -403,6 +438,10 @@ autodo_dev_read(struct cdev *dev __unused, struct uio *uio,
 
 	mtx_lock(&autodo_ring_mtx);
 	while (autodo_ring_count == 0) {
+		if (autodo_dev_dying) {
+			mtx_unlock(&autodo_ring_mtx);
+			return (ENXIO);
+		}
 		error = msleep(&autodo_ring_count, &autodo_ring_mtx,
 		    PCATCH, "autodo", 0);
 		if (error != 0) {
@@ -440,6 +479,8 @@ autodo_dev_poll(struct cdev *dev __unused, int events, struct thread *td)
 		else
 			selrecord(td, &autodo_sel);
 	}
+	if (autodo_dev_dying)
+		revents |= POLLERR;
 	mtx_unlock(&autodo_ring_mtx);
 	return (revents);
 }
@@ -555,6 +596,7 @@ static struct cdevsw autodo_cdevsw = {
 	.d_poll = autodo_dev_poll,
 	.d_ioctl = autodo_dev_ioctl,
 	.d_kqfilter = autodo_dev_kqfilter,
+	.d_purge = autodo_dev_purge,
 	.d_name = "autodo",
 };
 
@@ -773,7 +815,7 @@ granted:
 	if (autodo_log_grants) {
 		autodo_emit_event(cred, priv, 1);
 		if (ratecheck(&autodo_log_lasttime, &(struct timeval){1, 0}))
-			printf("mac_autodo: grant priv %d to uid %u "
+			printf("mac_do_auto: grant priv %d to uid %u "
 			    "(pid %d, %s)\n",
 			    priv, cred->cr_uid, curproc->p_pid,
 			    curproc->p_comm);
@@ -796,7 +838,7 @@ autodo_init(struct mac_policy_conf *mpc __unused)
 	autodo_bitmap_fill(autodo_scope_bitmap);
 	autodo_policy_count = 0;
 
-	/* Initialize ring buffer and chardev. */
+	/* Initialize ring buffer and chardev state. */
 	mtx_init(&autodo_ring_mtx, "autodo ring", NULL, MTX_DEF);
 	autodo_ring = malloc(sizeof(struct autodo_event) * AUTODO_RING_SIZE,
 	    M_AUTODO, M_WAITOK | M_ZERO);
@@ -804,9 +846,8 @@ autodo_init(struct mac_policy_conf *mpc __unused)
 	autodo_ring_tail = 0;
 	autodo_ring_count = 0;
 	autodo_dev_open = 0;
+	autodo_dev_dying = 0;
 	knlist_init_mtx(&autodo_sel.si_note, &autodo_ring_mtx);
-	autodo_cdev = make_dev(&autodo_cdevsw, 0, UID_ROOT, GID_WHEEL,
-	    0640, "autodo");
 
 	autodo_osd_jail_slot = osd_jail_register(
 	    autodo_osd_jail_destructor, autodo_osd_methods);
@@ -824,11 +865,44 @@ autodo_init(struct mac_policy_conf *mpc __unused)
 	sx_sunlock(&allprison_lock);
 }
 
+/*
+ * Create /dev/autodo once devfs is initialized.
+ *
+ * This must not happen in autodo_init(): when the module is preloaded
+ * by the loader, MAC policy registration runs at SI_SUB_MAC_POLICY,
+ * before devfs (SI_SUB_DEVFS), and make_dev() would dereference the
+ * not-yet-initialized devfs unit number allocator (devfs_inos == NULL),
+ * panicking the kernel at boot.  When the module is kldloaded at
+ * runtime instead, the linker runs this SYSINIT immediately after
+ * MOD_LOAD, so the device appears at load time in both cases.
+ */
+static void
+autodo_cdev_init(void *arg __unused)
+{
+
+	autodo_cdev = make_dev(&autodo_cdevsw, 0, UID_ROOT, GID_WHEEL,
+	    0640, "autodo");
+}
+SYSINIT(autodo_cdev, SI_SUB_DEVFS, SI_ORDER_MIDDLE, autodo_cdev_init, NULL);
+
 static void
 autodo_destroy(struct mac_policy_conf *mpc __unused)
 {
 
 	osd_jail_deregister(autodo_osd_jail_slot);
+
+	/*
+	 * Reject new opens and wake any thread sleeping in read(2).
+	 * destroy_dev() waits for threads inside cdevsw methods to
+	 * drain, invoking autodo_dev_purge() to prod sleepers, so no
+	 * thread can be executing in this module when it returns.
+	 * An idle open fd cannot exist here: MOD_QUIESCE vetoes the
+	 * unload while /dev/autodo is open.
+	 */
+	mtx_lock(&autodo_ring_mtx);
+	autodo_dev_dying = 1;
+	wakeup(&autodo_ring_count);
+	mtx_unlock(&autodo_ring_mtx);
 
 	if (autodo_cdev != NULL) {
 		destroy_dev(autodo_cdev);
@@ -852,6 +926,53 @@ static struct mac_policy_ops autodo_ops = {
 	.mpo_priv_grant = autodo_priv_grant,
 };
 
-MAC_POLICY_SET(&autodo_ops, mac_autodo,
-    "MAC/autodo: transparent privilege escalation",
-    MPC_LOADTIME_FLAG_UNLOADOK, NULL);
+/*
+ * Custom modevent wrapping mac_policy_modevent().  Veto MOD_UNLOAD
+ * while /dev/autodo is open so no file descriptor can be left pointing
+ * at a cdevsw in unloaded module text; set autodo_dev_dying at quiesce
+ * time so an open(2) racing the unload fails instead of establishing
+ * a new fd against a device that is about to be destroyed.
+ */
+static int
+mac_do_auto_modevent(module_t mod, int type, void *data)
+{
+	int error;
+
+	switch (type) {
+	case MOD_QUIESCE:
+		mtx_lock(&autodo_ring_mtx);
+		error = autodo_dev_open ? EBUSY : 0;
+		if (error == 0)
+			autodo_dev_dying = 1;
+		mtx_unlock(&autodo_ring_mtx);
+		return (error);
+	case MOD_UNLOAD:
+		error = mac_policy_modevent(mod, type, data);
+		if (error != 0) {
+			/* Unload aborted; the device stays usable. */
+			mtx_lock(&autodo_ring_mtx);
+			autodo_dev_dying = 0;
+			mtx_unlock(&autodo_ring_mtx);
+		}
+		return (error);
+	default:
+		return (mac_policy_modevent(mod, type, data));
+	}
+}
+
+static struct mac_policy_conf mac_do_auto_mac_policy_conf = {
+	.mpc_name = "mac_do_auto",
+	.mpc_fullname = "MAC/autodo: transparent privilege escalation",
+	.mpc_ops = &autodo_ops,
+	.mpc_loadtime_flags = MPC_LOADTIME_FLAG_UNLOADOK,
+	.mpc_field_off = NULL,
+};
+static moduledata_t mac_do_auto_mod = {
+	"mac_do_auto",
+	mac_do_auto_modevent,
+	&mac_do_auto_mac_policy_conf
+};
+MODULE_DEPEND(mac_do_auto, kernel_mac_support, MAC_VERSION,
+    MAC_VERSION, MAC_VERSION);
+DECLARE_MODULE(mac_do_auto, mac_do_auto_mod, SI_SUB_MAC_POLICY,
+    SI_ORDER_MIDDLE);

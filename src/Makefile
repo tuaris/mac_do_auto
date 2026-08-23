@@ -1,4 +1,4 @@
-KMOD=	mac_autodo
-SRCS=	mac_autodo.c
+KMOD=	mac_do_auto
+SRCS=	mac_do_auto.c
 
 .include <bsd.kmod.mk>

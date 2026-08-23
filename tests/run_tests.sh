@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# mac_autodo test harness
+# mac_do_auto test harness
 #
 # Must be run as a wheel-group member with doas/mdo access.
 # The module must NOT be loaded before running (script handles load/unload).
@@ -10,7 +10,7 @@ set -e
 
 PASS=0
 FAIL=0
-MODULE_PATH="${MODULE_PATH:-$(dirname "$0")/../src/mac_autodo.ko}"
+MODULE_PATH="${MODULE_PATH:-$(dirname "$0")/../src/mac_do_auto.ko}"
 TEST_FILE="/etc/master.passwd"
 
 pass() {
@@ -40,8 +40,8 @@ assert_fail() {
 }
 
 # Ensure module is not loaded
-kldstat -q -m mac_autodo 2>/dev/null && {
-	echo "ERROR: mac_autodo is already loaded. Unload it first."
+kldstat -q -m mac_do_auto 2>/dev/null && {
+	echo "ERROR: mac_do_auto is already loaded. Unload it first."
 	exit 1
 }
 
@@ -57,7 +57,7 @@ id -Gn | grep -qw wheel || {
 	exit 1
 }
 
-echo "=== mac_autodo test suite ==="
+echo "=== mac_do_auto test suite ==="
 echo "Module: $MODULE_PATH"
 echo ""
 
@@ -69,7 +69,7 @@ assert_fail "cat $TEST_FILE" "read root file denied without module"
 echo ""
 echo "[2] Module load"
 doas kldload "$MODULE_PATH"
-assert_success "kldstat -q -m mac_autodo" "module loaded successfully"
+assert_success "kldstat -q -m mac_do_auto" "module loaded successfully"
 
 # --- Test: Access granted with module ---
 echo ""
@@ -230,7 +230,7 @@ if [ -x "$DAEMON_PATH" ] && [ -d "$TEMPLATE_DIR" ]; then
 	assert_success "cat $TEST_FILE" "multi-group: wheel has VFS access via minimal template"
 
 	# Jail operations should be denied (minimal = vfs only).
-	# Use doas for jail -m since mac_autodo minimal scope denies
+	# Use doas for jail -m since mac_do_auto minimal scope denies
 	# jail ops, but mac_do (separate module) still works via doas.
 	if [ -n "$FIRST_JAIL" ]; then
 		doas jail -m name="$FIRST_JAIL" mac.autodo=new 2>/dev/null || true
@@ -251,8 +251,8 @@ fi
 # --- Test: Module unload ---
 echo ""
 echo "[12] Module unload"
-doas kldunload mac_autodo
-assert_success "! kldstat -q -m mac_autodo" "module unloaded"
+doas kldunload mac_do_auto
+assert_success "! kldstat -q -m mac_do_auto" "module unloaded"
 assert_fail "cat $TEST_FILE" "access denied after unload"
 
 # --- Summary ---

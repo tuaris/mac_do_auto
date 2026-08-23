@@ -38,8 +38,8 @@ autodo_eventd_prestart()
 	local logdir
 	logdir=$(dirname "${autodo_eventd_logfile}")
 	[ -d "${logdir}" ] || install -d -m 750 "${logdir}"
-	if ! kldstat -q -m mac_autodo; then
-		warn "mac_autodo kernel module is not loaded"
+	if ! kldstat -q -m mac_do_auto; then
+		warn "mac_do_auto kernel module is not loaded"
 		return 1
 	fi
 	if [ ! -c /dev/autodo ]; then

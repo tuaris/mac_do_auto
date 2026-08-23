@@ -1,21 +1,21 @@
 #!/usr/libexec/atf-sh
 #
-# Privilege scoping tests for mac_autodo.
+# Privilege scoping tests for mac_do_auto.
 # Tests category-based bitmap, invalid categories, deny-by-scope.
 #
 
 MODULE_DIR="$(atf_get_srcdir)/../src"
-MODULE_PATH="${MODULE_DIR}/mac_autodo.ko"
+MODULE_PATH="${MODULE_DIR}/mac_do_auto.ko"
 TEST_FILE="/etc/master.passwd"
 TEST_USER="admin"
 
 load_module() {
-	kldstat -q -m mac_autodo 2>/dev/null && return 0
-	kldload "${MODULE_PATH}" || atf_fail "cannot load mac_autodo.ko"
+	kldstat -q -m mac_do_auto 2>/dev/null && return 0
+	kldload "${MODULE_PATH}" || atf_fail "cannot load mac_do_auto.ko"
 }
 
 unload_module() {
-	kldstat -q -m mac_autodo 2>/dev/null && kldunload mac_autodo
+	kldstat -q -m mac_do_auto 2>/dev/null && kldunload mac_do_auto
 	return 0
 }
 
