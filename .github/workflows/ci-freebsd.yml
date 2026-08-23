@@ -38,6 +38,16 @@ jobs:
           pw useradd -n admin -G wheel -m -s /bin/sh || true
           printf 'permit nopass root\npermit nopass keepenv :wheel\n' \
             > /usr/local/etc/doas.conf
+
+          # The denial tests require that wheel cannot read this file
+          # via plain DAC (the 15.1 VM image ships it group-readable)
+          chmod 0600 /etc/master.passwd
+
+          # Jail tests expect at least one running jail
+          jail -c name=citest path=/ host=new persist
+
+          # autodo-eventd audit log directory
+          mkdir -p /var/log/autodo
         run: |
           set -ex
 

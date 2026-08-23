@@ -113,10 +113,19 @@ else
 	fail "grant_count did not increment ($COUNT1 -> $COUNT2)"
 fi
 
-# --- Test: Jail isolation (if jails exist) ---
+# --- Test: Jail isolation ---
 echo ""
 echo "[8] Jail isolation"
 FIRST_JAIL=$(jls -n name 2>/dev/null | head -1 | sed 's/name=//')
+CREATED_JAIL=""
+if [ -z "$FIRST_JAIL" ]; then
+	# No jails on this system (e.g. a clean CI VM) — create a minimal
+	# one so the jail tests still run.
+	if jail -c name=autodo_test path=/ host=new persist 2>/dev/null; then
+		FIRST_JAIL=autodo_test
+		CREATED_JAIL=1
+	fi
+fi
 if [ -n "$FIRST_JAIL" ]; then
 	# Jails default to disabled
 	assert_fail "jexec $FIRST_JAIL cat /etc/master.passwd" \
@@ -149,11 +158,15 @@ assert_success "sysctl security.mac.autodo.scope" "scope sysctl readable"
 # Restrict to VFS only
 sysctl security.mac.autodo.scope=vfs >/dev/null
 assert_success "cat $TEST_FILE" "VFS access works with scope=vfs"
-assert_fail "jexec $FIRST_JAIL hostname" "jexec denied with scope=vfs (needs jail category)"
+if [ -n "$FIRST_JAIL" ]; then
+	assert_fail "jexec $FIRST_JAIL hostname" "jexec denied with scope=vfs (needs jail category)"
 
-# Add jail category
-doas sysctl security.mac.autodo.scope=vfs,jail >/dev/null
-assert_success "jexec $FIRST_JAIL hostname" "jexec works with scope=vfs,jail"
+	# Add jail category
+	doas sysctl security.mac.autodo.scope=vfs,jail >/dev/null
+	assert_success "jexec $FIRST_JAIL hostname" "jexec works with scope=vfs,jail"
+else
+	echo "  SKIP: no jails available for scope test"
+fi
 
 # Invalid category rejected
 if sysctl security.mac.autodo.scope=bogus >/dev/null 2>&1; then
@@ -247,6 +260,9 @@ if [ -x "$DAEMON_PATH" ] && [ -d "$TEMPLATE_DIR" ]; then
 else
 	echo "  SKIP: daemon not built or templates not found"
 fi
+
+# Remove the temporary jail if we created one
+[ -n "$CREATED_JAIL" ] && doas jail -r "$FIRST_JAIL" 2>/dev/null || true
 
 # --- Test: Module unload ---
 echo ""
