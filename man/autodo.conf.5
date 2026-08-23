@@ -1,0 +1,143 @@
+.Dd August 23, 2026
+.Dt AUTODO.CONF 5
+.Os
+.Sh NAME
+.Nm autodo.conf
+.Nd configuration file for the autodo-eventd daemon
+.Sh DESCRIPTION
+.Nm
+is the
+.Xr autodo-eventd 8
+configuration file, in UCL format
+.Pa ( /usr/local/etc/autodo/autodo.conf
+by default).
+It controls which groups receive implicit privileges from the
+.Xr mac_do_auto 4
+kernel module, the scope of those privileges, the path deny list, and
+audit logging.
+.Pp
+The daemon reloads the file automatically on change or on
+.Dv SIGHUP .
+.Sh DIRECTIVES
+.Bl -tag -width indent
+.It Va enabled = true | false
+Master switch (default: true).
+When false, a zero-permission policy is pushed and the path deny list
+is cleared.
+.It Va profile_dir = Ar path
+Directory containing named policy profiles
+(default:
+.Pa /usr/local/etc/autodo/profiles ) .
+.El
+.Sh GROUPS
+The
+.Va groups
+block maps group names (resolved with
+.Xr getgrnam 3 )
+to policy.
+Each entry either references a named profile or defines an inline
+scope:
+.Bd -literal -offset indent
+groups {
+    wheel {
+        profile = "all";
+    }
+    operators {
+        scope {
+            categories = ["vfs", "net"];
+        }
+        deny {
+            privileges = ["PRIV_VFS_MOUNT"];
+        }
+    }
+}
+.Ed
+.Pp
+Categories correspond to families of
+.Xr priv 9
+constants:
+.Li system , audit , cred , debug , jail , kld , proc , vfs , vm , dev ,
+.Li net ,
+.Li misc ,
+or
+.Li all .
+The
+.Va deny privileges
+list removes individual privileges from the compiled scope.
+.Pp
+When the
+.Va groups
+block is absent, the legacy single-group behavior applies: the group in
+.Va security.mac.autodo.gid
+receives the scope from the top-level
+.Va scope
+directive.
+.Sh PATH DENY LIST
+The top-level
+.Va deny paths
+list names absolute path prefixes that autodo-elevated users may not
+modify:
+.Bd -literal -offset indent
+deny {
+    paths = ["/boot/kernel", "/bin", "/sbin"];
+}
+.Ed
+.Pp
+Create, delete, rename, mkdir, write, chmod/chown, and flag changes
+under these prefixes are denied for non-root members of managed groups,
+even when the module would otherwise grant the privilege.
+Root is exempt; reads are unaffected.
+See
+.Xr mac_do_auto 4
+for the exact semantics and limitations.
+.Sh AUDIT
+The
+.Va audit
+block controls event logging:
+.Bd -literal -offset indent
+audit {
+    enabled = true;
+    log_file = "/var/log/autodo/events.json";
+}
+.Ed
+.Pp
+Events are appended as JSON lines with fields
+.Va ts , pid , uid , gid , priv , granted ,
+and
+.Va comm .
+.Sh PROFILES
+A profile is a UCL file in
+.Va profile_dir
+with the same
+.Va scope
+and
+.Va deny
+structure as an inline group entry, plus an optional
+.Va description :
+.Bd -literal -offset indent
+description = "Minimal: file system access only";
+scope {
+    categories = ["vfs"];
+}
+.Ed
+.Pp
+Stock profiles:
+.Li all
+(everything),
+.Li minimal
+(vfs only),
+.Li developer ,
+and
+.Li server-admin .
+.Sh FILES
+.Bl -tag -width indent
+.It Pa /usr/local/etc/autodo/autodo.conf
+Configuration file.
+.It Pa /usr/local/etc/autodo/profiles/
+Policy profile directory.
+.El
+.Sh SEE ALSO
+.Xr mac_do_auto 4 ,
+.Xr autodo-eventd 8
+.Sh AUTHORS
+.An Daniel Morante Aq Mt daniel@morante.net

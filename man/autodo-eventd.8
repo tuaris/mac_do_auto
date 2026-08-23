@@ -1,0 +1,69 @@
+.Dd August 23, 2026
+.Dt AUTODO-EVENTD 8
+.Os
+.Sh NAME
+.Nm autodo-eventd
+.Nd companion daemon for the mac_do_auto MAC policy module
+.Sh SYNOPSIS
+.Nm
+.Op Fl Fl config Ns = Ns Ar path
+.Op Fl Fl log Ns = Ns Ar path
+.Sh DESCRIPTION
+.Nm
+manages the runtime policy of the
+.Xr mac_do_auto 4
+kernel module and consumes its audit events.
+At startup, and again whenever the configuration changes, it reads the
+.Xr autodo.conf 5
+configuration file, resolves group names and policy profiles, compiles
+privilege bitmaps, and pushes the result to the kernel module through
+.Pa /dev/autodo .
+It then monitors
+.Pa /dev/autodo
+for audit events, appending them as JSON lines to the audit log.
+.Pp
+The daemon runs in the foreground; the
+.Pa autodo_eventd
+rc script supervises it with
+.Xr daemon 8 .
+.Sh OPTIONS
+.Bl -tag -width indent
+.It Fl Flconfig Ns = Ns Ar path
+Configuration file
+(default:
+.Pa /usr/local/etc/autodo/autodo.conf ) .
+.It Fl Fl log Ns = Ns Ar path
+Audit log file
+(default:
+.Pa /var/log/autodo/events.json ) .
+.It Fl Fl help
+Print usage and exit.
+.El
+.Sh SIGNALS
+.Bl -tag -width indent
+.It Dv SIGHUP
+Reload the configuration file and re-push policy to the kernel.
+The configuration file is also watched for changes and reloaded
+automatically.
+.It Dv SIGTERM
+Shut down cleanly.
+.El
+.Sh FILES
+.Bl -tag -width indent
+.It Pa /usr/local/etc/autodo/autodo.conf
+Configuration file.
+.It Pa /usr/local/etc/autodo/profiles/
+Directory of named policy profiles referenced by the configuration.
+.It Pa /var/log/autodo/events.json
+Audit event log (JSON lines).
+.It Pa /dev/autodo
+Kernel module control and event device.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr mac_do_auto 4 ,
+.Xr autodo.conf 5 ,
+.Xr daemon 8
+.Sh AUTHORS
+.An Daniel Morante Aq Mt daniel@morante.net

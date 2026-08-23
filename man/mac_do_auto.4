@@ -1,0 +1,150 @@
+.Dd August 23, 2026
+.Dt MAC_DO_AUTO 4
+.Os
+.Sh NAME
+.Nm mac_do_auto
+.Nd MAC policy for transparent privilege escalation by group membership
+.Sh SYNOPSIS
+To load the module at boot time, place the following line in
+.Xr loader.conf 5 :
+.Bd -literal -offset indent
+mac_do_auto_load="YES"
+.Ed
+.Pp
+To load it at runtime:
+.Bd -literal -offset indent
+kldload mac_do_auto
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+kernel module implements the
+.Xr mac 4
+framework's
+.Fn mac_priv_grant
+hook.
+When standard file permissions deny an operation and the kernel checks
+whether the process holds the required privilege,
+.Nm
+grants the privilege if the process credential includes membership in the
+configured group (by default GID 0,
+.Dq wheel ) .
+The operation then succeeds as if the process were running as root,
+without requiring
+.Xr mdo 1 ,
+.Xr sudo 8 ,
+or
+.Xr doas 1 .
+.Pp
+Privileges may be restricted to a subset (scope) and partitioned across
+multiple groups by the
+.Xr autodo-eventd 8
+companion daemon.
+.Sh SYSCTL VARIABLES
+The following variables are available under
+.Dv security.mac.autodo :
+.Bl -tag -width ".Va grant_count"
+.It Va enabled
+Enable or disable privilege grants globally (default: 1).
+The host is governed by this knob; jails use the per-jail parameter
+described below.
+.It Va gid
+GID whose members receive implicit privileges when no daemon-managed
+policy is installed (default: 0, wheel).
+.It Va log_grants
+When non-zero, emit a rate-limited log line to the kernel message buffer
+for each grant, and append audit events to the ring buffer described
+below (default: 0).
+.It Va grant_count
+Read-only counter of privileges granted since module load.
+.It Va scope
+Privilege scope as a comma-separated list of categories, or
+.Dq all
+(default).
+Categories:
+.Li system , audit , cred , debug , jail , kld , proc , vfs , vm , dev ,
+.Li net ,
+and
+.Li misc .
+.El
+.Sh DEVICE
+The module creates
+.Pa /dev/autodo
+(mode 0640, root:wheel, single-open), which provides:
+.Bl -bullet
+.It
+A ring buffer of audit events (fixed 48-byte records,
+.Va struct autodo_event )
+readable with
+.Xr read 2 ,
+.Xr poll 2 ,
+and
+.Xr kqueue 2 .
+.It
+The
+.Xr ioctl 2
+interface used by
+.Xr autodo-eventd 8 :
+.Dv AUTODO_SET_SCOPE / AUTODO_GET_SCOPE
+(legacy single-group privilege bitmap),
+.Dv AUTODO_SET_POLICY / AUTODO_GET_POLICY
+(multi-group policy),
+.Dv AUTODO_SET_PATHS / AUTODO_GET_PATHS
+(path deny list), and
+.Dv AUTODO_FLUSH
+(discard pending events).
+The programming interface is defined in
+.Pa src/autodo.h .
+.El
+.Sh JAILS
+The per-jail parameter
+.Va mac.autodo
+controls the policy inside jails:
+.Dq disable
+(default for new jails),
+.Dq new
+(enabled in this jail), or
+.Dq inherit
+(follow the parent jail).
+Set with
+.Xr jail 8
+at creation time or via
+.Xr jail 8
+.Fl m .
+.Sh PATH DENY LIST
+An optional global list of path prefixes protects files from
+autodo-elevated users.
+Non-root members of managed groups are denied create, delete, rename,
+mkdir, write, chmod/chown, and flag changes under the listed prefixes,
+even though
+.Nm
+would otherwise grant them.
+Root is exempt and reads are unaffected.
+The list is empty by default and is managed by
+.Xr autodo-eventd 8
+from the
+.Va deny
+.Va paths
+setting in
+.Xr autodo.conf 5 .
+.Pp
+This is advisory footgun protection, not a security boundary:
+relative paths from inside a denied directory, operations on file
+descriptors opened before the deny, and path aliases (hard links)
+are not covered.
+Denials are logged, rate-limited, to the kernel message buffer.
+.Sh UNLOADING
+The module refuses to unload while
+.Pa /dev/autodo
+is open
+.Pq Dv EBUSY .
+Close the daemon and any other consumers before running
+.Xr kldunload 8 .
+.Sh SEE ALSO
+.Xr mac 4 ,
+.Xr mac_bsdextended 4 ,
+.Xr autodo.conf 5 ,
+.Xr autodo-eventd 8 ,
+.Xr kldload 8
+.Sh AUTHORS
+.An Daniel Morante Aq Mt daniel@morante.net
