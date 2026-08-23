@@ -9,6 +9,7 @@
 #ifndef _AUTODO_H_
 #define	_AUTODO_H_
 
+#include <sys/types.h>
 #include <sys/ioccom.h>
 
 /*
@@ -67,6 +68,29 @@ struct autodo_policy {
 };
 
 /*
+ * Global path deny list (advisory).
+ *
+ * Prefix match: a path is denied when it equals an entry or begins
+ * with "<entry>/".  Applies only to non-root processes whose credential
+ * holds an autodo-managed group; root is exempt so that package/updates
+ * and deliberate admin work as root are not impeded.  This is footgun
+ * protection ("Windows-style OS file protection"), not a mandatory
+ * access control boundary — path aliases (hard links, renames) are not
+ * tracked.
+ *
+ * AUTODO_MAX_PATHS is capped at 16 so that sizeof(struct autodo_pathlist)
+ * fits in the 13-bit IOCPARM_MASK size field of the ioctl encoding.
+ */
+#define	AUTODO_MAX_PATHS	16
+#define	AUTODO_PATH_LEN		256
+
+struct autodo_pathlist {
+	uint32_t	apl_count;	/* active entries (0..64) */
+	uint32_t	apl_pad;
+	char		apl_paths[AUTODO_MAX_PATHS][AUTODO_PATH_LEN];
+};
+
+/*
  * ioctl commands on /dev/autodo.
  *
  * AUTODO_SET_SCOPE  — push a compiled privilege bitmap (legacy single-group)
@@ -74,11 +98,15 @@ struct autodo_policy {
  * AUTODO_FLUSH      — discard all pending events in the ring buffer
  * AUTODO_SET_POLICY — push a multi-group policy from daemon to kernel
  * AUTODO_GET_POLICY — read the current multi-group policy
+ * AUTODO_SET_PATHS  — push the global path deny list from daemon to kernel
+ * AUTODO_GET_PATHS  — read the current path deny list
  */
 #define	AUTODO_SET_SCOPE	_IOW('A', 1, struct autodo_scope)
 #define	AUTODO_GET_SCOPE	_IOR('A', 2, struct autodo_scope)
 #define	AUTODO_FLUSH		_IO('A', 3)
 #define	AUTODO_SET_POLICY	_IOW('A', 4, struct autodo_policy)
 #define	AUTODO_GET_POLICY	_IOR('A', 5, struct autodo_policy)
+#define	AUTODO_SET_PATHS	_IOW('A', 6, struct autodo_pathlist)
+#define	AUTODO_GET_PATHS	_IOR('A', 7, struct autodo_pathlist)
 
 #endif /* _AUTODO_H_ */

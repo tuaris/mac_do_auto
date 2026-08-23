@@ -8,6 +8,9 @@ machine
 x86
 i386
 opt_global.h
+vnode_if.h
+vnode_if_newproto.h
+vnode_if_typedef.h
 
 # Zig build artifacts
 daemon/zig-out/

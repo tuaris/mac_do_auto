@@ -58,6 +58,37 @@ whether the process holds the required privilege, `mac_do_auto` checks if the
 calling process belongs to the authorized group.  If so, it grants the
 privilege — the operation succeeds as if the process were running as root.
 
+## Path Deny List
+
+An optional global deny list protects path prefixes from autodo-elevated
+users (advisory "OS file protection", in the spirit of Windows protecting
+system files):
+
+```ucl
+# autodo.conf
+deny {
+    paths = ["/boot/kernel", "/bin", "/sbin", "/usr/bin", "/usr/sbin",
+             "/lib", "/libexec"];
+}
+```
+
+Non-root members of managed groups are then denied create, delete, rename,
+mkdir, write, chmod/chown, and flag changes under those prefixes — even
+though autodo would otherwise grant them.  Root is exempt, and reads are
+unaffected.
+
+Caveats: this is footgun protection, not a security boundary.  Enforcement
+is by path string at lookup time plus a per-thread handoff to the open and
+setattr hooks; relative paths from inside a denied directory, fd-based
+operations on already-open files (`fchmod`, `ftruncate`, ...), and path
+aliases (hard links) are not covered.  Denials are logged (rate-limited) to
+the kernel message buffer.
+
+Performance: registering the lookup hook disables the namecache fast-lookup
+path while the module is loaded.  Measured impact on a lookup-heavy
+workload (`find` over ~13k files, warm cache) was within noise on
+15.1-RELEASE.
+
 ## Testing
 
 All tests require a FreeBSD host (not a jail — they load/unload the

@@ -52,6 +52,9 @@
 #include <sys/selinfo.h>
 #include <sys/filio.h>
 #include <sys/event.h>
+#include <sys/vnode.h>
+#include <sys/namei.h>
+#include <sys/fcntl.h>
 
 #include <security/mac/mac_policy.h>
 
@@ -75,6 +78,25 @@ static volatile uint64_t autodo_scope_bitmap[AUTODO_BITMAP_WORDS];
  */
 static struct autodo_policy_entry autodo_policy_entries[AUTODO_MAX_GROUPS];
 static volatile int autodo_policy_count;	/* 0 = legacy mode */
+
+/*
+ * Global path deny list.
+ *
+ * Written wholesale by the daemon via AUTODO_SET_PATHS under an
+ * exclusive sx; readers in the vnode check hooks take it shared.
+ * Empty by default.
+ */
+static struct sx	autodo_paths_sx;
+static char	autodo_paths[AUTODO_MAX_PATHS][AUTODO_PATH_LEN];
+static u_int	autodo_paths_count;
+static struct timeval autodo_pathlog_lasttime;
+
+/*
+ * Per-thread marker handing a matched lookup off to check_open/setattr
+ * (see autodo_vnode_check_lookup).  Single slot, advisory.
+ */
+static struct thread *autodo_mark_td;
+static char	autodo_mark_path[AUTODO_PATH_LEN];
 
 static inline int
 autodo_priv_in_scope(int priv)
@@ -542,6 +564,48 @@ autodo_dev_ioctl(struct cdev *dev __unused, u_long cmd, caddr_t data,
 		return (0);
 	}
 
+	case AUTODO_SET_PATHS: {
+		struct autodo_pathlist *pl = (struct autodo_pathlist *)data;
+		u_int n;
+
+		if (pl->apl_count > AUTODO_MAX_PATHS)
+			return (EINVAL);
+
+		/* Validate: force NUL termination, absolute paths only. */
+		for (n = 0; n < pl->apl_count; n++) {
+			pl->apl_paths[n][AUTODO_PATH_LEN - 1] = '\0';
+			if (pl->apl_paths[n][0] != '/')
+				return (EINVAL);
+			/* Strip trailing slashes (except root "/"). */
+			while (strlen(pl->apl_paths[n]) > 1 &&
+			    pl->apl_paths[n][strlen(pl->apl_paths[n]) - 1] == '/')
+				pl->apl_paths[n][strlen(pl->apl_paths[n]) - 1] =
+				    '\0';
+		}
+
+		sx_xlock(&autodo_paths_sx);
+		for (n = 0; n < pl->apl_count; n++)
+			memcpy(autodo_paths[n], pl->apl_paths[n],
+			    AUTODO_PATH_LEN);
+		autodo_paths_count = pl->apl_count;
+		autodo_mark_td = NULL;
+		sx_xunlock(&autodo_paths_sx);
+		return (0);
+	}
+
+	case AUTODO_GET_PATHS: {
+		struct autodo_pathlist *pl = (struct autodo_pathlist *)data;
+
+		sx_slock(&autodo_paths_sx);
+		pl->apl_count = autodo_paths_count;
+		pl->apl_pad = 0;
+		for (i = 0; i < (int)autodo_paths_count; i++)
+			memcpy(pl->apl_paths[i], autodo_paths[i],
+			    AUTODO_PATH_LEN);
+		sx_sunlock(&autodo_paths_sx);
+		return (0);
+	}
+
 	default:
 		return (ENOTTY);
 	}
@@ -755,6 +819,234 @@ autodo_priv_in_bitmap(const uint64_t *bitmap, int priv)
 }
 
 /*
+ * Check if the credential is subject to autodo management for the
+ * purpose of the path deny list: non-root and holding a managed group
+ * (legacy gid, or any group in the multi-group policy).  Root is
+ * exempt — the deny list guards the implicit-elevation path only, and
+ * must not impede legitimate root activity (pkg, freebsd-update, ...).
+ */
+static int
+autodo_cred_managed(struct ucred *cred)
+{
+	int i, count;
+
+	if (cred->cr_uid == 0)
+		return (0);
+	if (autodo_cred_has_gid(cred, (gid_t)autodo_gid))
+		return (1);
+	count = autodo_policy_count;
+	for (i = 0; i < count; i++) {
+		if (autodo_cred_has_gid(cred, autodo_policy_entries[i].ape_gid))
+			return (1);
+	}
+	return (0);
+}
+
+/*
+ * Common gate for the path deny hooks: list non-empty, module enabled,
+ * jail policy permits autodo, and the credential is autodo-managed.
+ */
+static int
+autodo_path_gate(struct ucred *cred)
+{
+
+	if (!autodo_enabled || autodo_paths_count == 0)
+		return (0);
+	if (cred->cr_prison != &prison0 &&
+	    !autodo_jail_enabled(cred->cr_prison))
+		return (0);
+	return (autodo_cred_managed(cred));
+}
+
+/*
+ * Prefix match against the deny list strings.  Returns the entry index
+ * or -1.  Caller must hold autodo_paths_sx (shared or exclusive).
+ */
+static int
+autodo_path_match(const char *path)
+{
+	size_t len;
+	u_int i;
+
+	for (i = 0; i < autodo_paths_count; i++) {
+		len = strlen(autodo_paths[i]);
+		if (strncmp(path, autodo_paths[i], len) == 0 &&
+		    (path[len] == '/' || path[len] == '\0'))
+			return ((int)i);
+	}
+	return (-1);
+}
+
+static void
+autodo_path_log_deny(struct ucred *cred, const char *path)
+{
+
+	if (ratecheck(&autodo_pathlog_lasttime, &(struct timeval){1, 0}))
+		printf("mac_do_auto: deny %s (uid %u, pid %d, %s)\n",
+		    path, cred->cr_uid, curproc->p_pid, curproc->p_comm);
+}
+
+/*
+ * MAC hook: vnode_check_lookup
+ *
+ * The path deny list is enforced at lookup time, where the full path
+ * string is still available (cnp->cn_pnbuf).  Mutating namei operations
+ * (CREATE/DELETE/RENAME) on a denied prefix are failed immediately.
+ * Plain LOOKUPs that match a denied prefix only set a per-thread
+ * marker, which autodo_vnode_check_open() and the setattr hooks
+ * consume to deny modification of the resolved vnode.  This avoids
+ * calling vn_fullpath(9) from vnode check hooks, which is unsafe:
+ * mutating hook contexts hold the target vnode exclusively locked and
+ * vn_fullpath()'s fallback path re-locks it (self-deadlock).
+ *
+ * A deny here precedes VOP_ACCESS()/priv_check(), so it wins over an
+ * autodo grant.
+ */
+static int
+autodo_vnode_check_lookup(struct ucred *cred, struct vnode *dvp,
+    struct label *dvplabel __unused, struct componentname *cnp)
+{
+	const char *path;
+	int match;
+
+	if (!autodo_path_gate(cred))
+		return (0);
+
+	path = cnp->cn_pnbuf;
+	if (path[0] == '/') {
+		/* Absolute path: string prefix match. */
+		sx_xlock(&autodo_paths_sx);
+		match = autodo_path_match(path);
+		if (match >= 0 && cnp->cn_nameiop != LOOKUP) {
+			autodo_path_log_deny(cred, path);
+			sx_xunlock(&autodo_paths_sx);
+			return (EPERM);
+		}
+		if (match >= 0) {
+			/*
+			 * LOOKUP intent: record a per-thread marker for
+			 * check_open/setattr to consume.  A stale marker
+			 * is only consumed by the thread that set it and
+			 * is overwritten by the next match, so a syscall
+			 * aborted between lookup and open can cause at
+			 * most one false deny on that thread's next
+			 * mutating open — acceptable for an advisory
+			 * feature.
+			 */
+			autodo_mark_td = curthread;
+			strlcpy(autodo_mark_path, path,
+			    sizeof(autodo_mark_path));
+		}
+		sx_xunlock(&autodo_paths_sx);
+		return (0);
+	}
+
+	/*
+	 * Relative paths cannot be matched without resolving the process
+	 * cwd to a path (unsafe here) — they are not covered.  This is
+	 * advisory footgun protection, not a hard boundary.
+	 */
+	return (0);
+}
+
+/*
+ * Consume the per-thread lookup marker.  Returns 1 when the current
+ * thread's lookup matched a denied prefix (marker cleared either way
+ * when it matches).
+ */
+static int
+autodo_consume_mark(void)
+{
+	int hit;
+
+	sx_xlock(&autodo_paths_sx);
+	hit = autodo_mark_td == curthread;
+	if (hit)
+		autodo_mark_td = NULL;
+	sx_xunlock(&autodo_paths_sx);
+	return (hit);
+}
+
+static int
+autodo_vnode_check_open(struct ucred *cred, struct vnode *vp __unused,
+    struct label *vplabel __unused, accmode_t accmode)
+{
+	int marker;
+
+	if (!autodo_path_gate(cred))
+		return (0);
+
+	/* Always consume a pending marker to keep it from going stale. */
+	marker = autodo_consume_mark();
+
+	if ((accmode & (VWRITE | VAPPEND | VADMIN)) == 0)
+		return (0);
+	if (marker) {
+		autodo_path_log_deny(cred, autodo_mark_path);
+		return (EPERM);
+	}
+	return (0);
+}
+
+static int
+autodo_vnode_check_setflags(struct ucred *cred, struct vnode *vp __unused,
+    struct label *vplabel __unused, u_long flags __unused)
+{
+
+	if (!autodo_path_gate(cred))
+		return (0);
+	if (autodo_consume_mark()) {
+		autodo_path_log_deny(cred, autodo_mark_path);
+		return (EPERM);
+	}
+	return (0);
+}
+
+static int
+autodo_vnode_check_setmode(struct ucred *cred, struct vnode *vp __unused,
+    struct label *vplabel __unused, mode_t mode __unused)
+{
+
+	if (!autodo_path_gate(cred))
+		return (0);
+	if (autodo_consume_mark()) {
+		autodo_path_log_deny(cred, autodo_mark_path);
+		return (EPERM);
+	}
+	return (0);
+}
+
+static int
+autodo_vnode_check_setowner(struct ucred *cred, struct vnode *vp __unused,
+    struct label *vplabel __unused, uid_t uid __unused,
+    gid_t gid __unused)
+{
+
+	if (!autodo_path_gate(cred))
+		return (0);
+	if (autodo_consume_mark()) {
+		autodo_path_log_deny(cred, autodo_mark_path);
+		return (EPERM);
+	}
+	return (0);
+}
+
+static int
+autodo_vnode_check_setutimes(struct ucred *cred, struct vnode *vp __unused,
+    struct label *vplabel __unused, struct timespec atime __unused,
+    struct timespec mtime __unused)
+{
+
+	if (!autodo_path_gate(cred))
+		return (0);
+	if (autodo_consume_mark()) {
+		autodo_path_log_deny(cred, autodo_mark_path);
+		return (EPERM);
+	}
+	return (0);
+}
+
+/*
  * MAC hook: mac_priv_grant
  *
  * Called when the kernel is about to deny a privilege.  Returning 0 grants
@@ -838,6 +1130,10 @@ autodo_init(struct mac_policy_conf *mpc __unused)
 	autodo_bitmap_fill(autodo_scope_bitmap);
 	autodo_policy_count = 0;
 
+	/* Initialize the path deny list (empty by default). */
+	sx_init(&autodo_paths_sx, "autodo paths");
+	autodo_paths_count = 0;
+
 	/* Initialize ring buffer and chardev state. */
 	mtx_init(&autodo_ring_mtx, "autodo ring", NULL, MTX_DEF);
 	autodo_ring = malloc(sizeof(struct autodo_event) * AUTODO_RING_SIZE,
@@ -918,12 +1214,19 @@ autodo_destroy(struct mac_policy_conf *mpc __unused)
 	autodo_ring_count = 0;
 	mtx_unlock(&autodo_ring_mtx);
 	mtx_destroy(&autodo_ring_mtx);
+	sx_destroy(&autodo_paths_sx);
 }
 
 static struct mac_policy_ops autodo_ops = {
 	.mpo_init = autodo_init,
 	.mpo_destroy = autodo_destroy,
 	.mpo_priv_grant = autodo_priv_grant,
+	.mpo_vnode_check_lookup = autodo_vnode_check_lookup,
+	.mpo_vnode_check_open = autodo_vnode_check_open,
+	.mpo_vnode_check_setflags = autodo_vnode_check_setflags,
+	.mpo_vnode_check_setmode = autodo_vnode_check_setmode,
+	.mpo_vnode_check_setowner = autodo_vnode_check_setowner,
+	.mpo_vnode_check_setutimes = autodo_vnode_check_setutimes,
 };
 
 /*

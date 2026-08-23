@@ -29,6 +29,18 @@ groups {
 #     categories = ["all"];
 # }
 
+# Global path deny list (advisory "OS file protection").
+# Non-root members of managed groups are denied create/delete/rename/
+# mkdir under these absolute prefixes, and write/chmod/chown of the
+# resolved files — even when autodo would otherwise grant them.
+# Root is exempt, reads are unaffected.  This is footgun protection,
+# not a security boundary: relative paths from inside a denied
+# directory and fd-based operations (fchmod etc.) are not covered.
+# deny {
+#     paths = ["/boot/kernel", "/bin", "/sbin", "/usr/bin", "/usr/sbin",
+#              "/lib", "/libexec"];
+# }
+
 audit {
     enabled = true;
     log_file = "/var/log/autodo/events.json";

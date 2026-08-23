@@ -38,6 +38,18 @@ const AUTODO_GET_SCOPE: c_ulong = 0x40584102; // _IOR('A', 2, struct autodo_scop
 const AUTODO_FLUSH: c_ulong = 0x20004103; // _IO('A', 3)
 // _IOW('A', 4, struct autodo_policy) — sizeof = 8 + 16*96 = 1544 = 0x608
 const AUTODO_SET_POLICY: c_ulong = 0x86084104;
+// _IOW('A', 6, struct autodo_pathlist) — sizeof = 8 + 16*256 = 4104 = 0x1008
+const AUTODO_SET_PATHS: c_ulong = 0x90084106;
+const AUTODO_GET_PATHS: c_ulong = 0x50084107; // _IOR('A', 7, struct autodo_pathlist)
+
+const AUTODO_MAX_PATHS = 16;
+const AUTODO_PATH_LEN = 256;
+
+const AutodoPathlist = extern struct {
+    apl_count: u32,
+    apl_pad: u32,
+    apl_paths: [AUTODO_MAX_PATHS][AUTODO_PATH_LEN]u8,
+};
 const AUTODO_GET_POLICY: c_ulong = 0x46084105;
 
 const default_config_path = "/usr/local/etc/autodo/autodo.conf";
@@ -192,6 +204,11 @@ fn pushPolicy(dev_fd: posix.fd_t, policy: *AutodoPolicy) !void {
     if (rc < 0) return error.IoctlFailed;
 }
 
+fn pushPaths(dev_fd: posix.fd_t, paths: *AutodoPathlist) !void {
+    const rc = ioctl(dev_fd, AUTODO_SET_PATHS, @as(*anyopaque, @ptrCast(paths)));
+    if (rc < 0) return error.IoctlFailed;
+}
+
 const c_grp = @cImport({
     @cInclude("grp.h");
 });
@@ -218,6 +235,9 @@ const Config = struct {
     groups: [AUTODO_MAX_GROUPS]GroupEntry = undefined,
     num_groups: usize = 0,
     has_groups: bool = false,
+    // Global path deny list (root-level "deny { paths = [...] }")
+    deny_paths: [AUTODO_MAX_PATHS][]const u8 = undefined,
+    num_deny_paths: usize = 0,
 
     fn setAll(self: *Config) void {
         self.all = true;
@@ -423,6 +443,31 @@ fn loadConfig(path: [*:0]const u8) ?Config {
         }
     }
 
+    // Global path deny list: deny { paths = ["/boot/kernel", ...] }
+    if (root.lookup("deny")) |deny_obj| {
+        if (deny_obj.lookup("paths")) |paths_arr| {
+            var it = paths_arr.iterate();
+            while (it.next()) |item| {
+                if (cfg.num_deny_paths >= AUTODO_MAX_PATHS) {
+                    log(.warn, "too many deny paths (max {d}), ignoring rest", .{AUTODO_MAX_PATHS});
+                    break;
+                }
+                if (item.toString()) |s| {
+                    if (s.len == 0 or s[0] != '/') {
+                        log(.warn, "deny path must be absolute, ignoring: {s}", .{s});
+                        continue;
+                    }
+                    if (s.len >= AUTODO_PATH_LEN) {
+                        log(.warn, "deny path too long (max {d}), ignoring: {s}", .{ AUTODO_PATH_LEN - 1, s });
+                        continue;
+                    }
+                    cfg.deny_paths[cfg.num_deny_paths] = s;
+                    cfg.num_deny_paths += 1;
+                }
+            }
+        }
+    }
+
     if (root.lookup("audit")) |audit_obj| {
         if (audit_obj.lookup("enabled")) |obj| {
             cfg.audit_enabled = obj.toBool();
@@ -483,6 +528,22 @@ fn makeKevent(ident: usize, filter: c_short, flags: c_ushort, fflags: c_uint) KE
     };
 }
 
+fn applyPaths(dev_fd: posix.fd_t, cfg: *const Config) void {
+    var paths = std.mem.zeroes(AutodoPathlist);
+    paths.apl_count = @intCast(cfg.num_deny_paths);
+    for (0..cfg.num_deny_paths) |i| {
+        const s = cfg.deny_paths[i];
+        @memcpy(paths.apl_paths[i][0..s.len], s);
+    }
+    pushPaths(dev_fd, &paths) catch {
+        log(.err, "ioctl SET_PATHS failed", .{});
+        return;
+    };
+    if (cfg.num_deny_paths > 0) {
+        log(.info, "pushed path deny list ({d} paths)", .{cfg.num_deny_paths});
+    }
+}
+
 fn applyConfig(dev_fd: posix.fd_t, cfg: *const Config) void {
     if (!cfg.enabled) {
         // Disabled: push a policy with one entry (GID 0, empty bitmap).
@@ -499,6 +560,9 @@ fn applyConfig(dev_fd: posix.fd_t, cfg: *const Config) void {
                 log(.err, "failed to push disabled scope", .{});
             };
         };
+        // Clear the path deny list as well: disabled means disabled.
+        var paths = std.mem.zeroes(AutodoPathlist);
+        pushPaths(dev_fd, &paths) catch {};
         log(.info, "module disabled via config", .{});
         return;
     }
@@ -526,6 +590,8 @@ fn applyConfig(dev_fd: posix.fd_t, cfg: *const Config) void {
         };
         log(.info, "pushed legacy scope bitmap", .{});
     }
+
+    applyPaths(dev_fd, cfg);
 }
 
 pub fn main() !void {
@@ -564,6 +630,7 @@ pub fn main() !void {
         log(.info, "loaded config from {s}", .{config_path});
         applyConfig(dev_fd, &cfg);
         log_path = cfg.log_file;
+        if (!cfg.audit_enabled) log_path = "";
     } else {
         log(.warn, "no config at {s}, using defaults (scope=all)", .{config_path});
         var scope = AutodoScope{ .as_bitmap = [_]u64{~@as(u64, 0)} ** AUTODO_BITMAP_WORDS };
