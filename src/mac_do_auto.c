@@ -55,6 +55,8 @@
 #include <sys/vnode.h>
 #include <sys/namei.h>
 #include <sys/fcntl.h>
+#include <sys/queue.h>
+#include <sys/resourcevar.h>
 
 #include <security/mac/mac_policy.h>
 
@@ -102,6 +104,55 @@ static struct timeval autodo_pathlog_lasttime;
  */
 static struct thread *autodo_mark_td;
 static char	autodo_mark_path[AUTODO_PATH_LEN];
+
+/*
+ * Escalated object creation.
+ *
+ * Filesystems take the owner of a new vnode from cnp->cn_cred.  When the
+ * parent directory is writable only through an autodo grant,
+ * autodo_vnode_check_create() replaces cn_cred with a copy of the caller's
+ * credential whose euid is 0, so the object is owned by root as it would
+ * be under mdo(1) or doas(1).  Substitutes are kept on the creating thread
+ * (thread OSD) and released when it returns to user mode (AUTODO_TDA AST)
+ * or is destroyed.  The module claims the TDA_MOD4 AST slot.
+ */
+#define	AUTODO_TDA	TDA_MOD4
+
+struct autodo_esc {
+	SLIST_ENTRY(autodo_esc) ae_link;
+	struct ucred	*ae_src;	/* caller credential (held) */
+	struct ucred	*ae_cred;	/* euid 0 copy installed in cn_cred */
+};
+
+struct autodo_td {
+	SLIST_HEAD(, autodo_esc) at_esc;
+};
+
+static u_int	autodo_td_slot;
+static struct mtx autodo_esc_mtx;
+static u_int	autodo_esc_count;	/* live substitutes (autodo_esc_mtx) */
+static int	autodo_esc_dying;	/* unload in progress (autodo_esc_mtx) */
+
+/*
+ * Threads probing whether a directory is writable without autodo;
+ * autodo_priv_grant() abstains for them.  Entries live on the probing
+ * thread's stack.
+ */
+#define	AUTODO_PROBE_BUCKETS	32
+
+struct autodo_probe {
+	LIST_ENTRY(autodo_probe) ap_link;
+	struct thread	*ap_td;
+};
+
+static struct autodo_probe_bucket {
+	struct mtx	apb_mtx;
+	LIST_HEAD(, autodo_probe) apb_list;
+} autodo_probe_buckets[AUTODO_PROBE_BUCKETS];
+static volatile u_int autodo_probe_count;
+
+#define	AUTODO_PROBE_BUCKET(td)						\
+	(&autodo_probe_buckets[(u_int)(td)->td_tid % AUTODO_PROBE_BUCKETS])
 
 static inline int
 autodo_priv_in_scope(int priv)
@@ -824,6 +875,230 @@ autodo_priv_in_bitmap(const uint64_t *bitmap, int priv)
 	return ((bitmap[word] >> bit) & 1);
 }
 
+#define	AUTODO_ABSTAIN		0
+#define	AUTODO_GRANT		1
+#define	AUTODO_SCOPE_DENY	2	/* managed group, privilege out of scope */
+
+/*
+ * Policy decision for a privilege request, without accounting or audit.
+ */
+static int
+autodo_priv_decide(struct ucred *cred, int priv)
+{
+	struct prison *pr;
+	int i, policy_count;
+
+	if (!autodo_enabled)
+		return (AUTODO_ABSTAIN);
+
+	/*
+	 * Check jail policy.  The host (prison0) is always governed by
+	 * the global 'enabled' sysctl above.  For jails, check per-jail
+	 * OSD configuration.
+	 */
+	pr = cred->cr_prison;
+	if (pr != &prison0 && !autodo_jail_enabled(pr))
+		return (AUTODO_ABSTAIN);
+
+	/*
+	 * Multi-group policy path.  When the daemon has pushed a policy
+	 * (policy_count > 0), the first entry whose GID the credential
+	 * holds decides: grant if its bitmap includes the privilege,
+	 * otherwise deny.  No matching entry abstains.
+	 */
+	policy_count = autodo_policy_count;
+	if (policy_count > 0) {
+		for (i = 0; i < policy_count; i++) {
+			if (!autodo_cred_has_gid(cred,
+			    autodo_policy_entries[i].ape_gid))
+				continue;
+			if (!autodo_priv_in_bitmap(
+			    autodo_policy_entries[i].ape_bitmap, priv))
+				return (AUTODO_SCOPE_DENY);
+			return (AUTODO_GRANT);
+		}
+		return (AUTODO_ABSTAIN);
+	}
+
+	/*
+	 * Legacy single-GID path (no daemon, manual sysctl use).
+	 */
+	if (!autodo_cred_has_gid(cred, (gid_t)autodo_gid))
+		return (AUTODO_ABSTAIN);
+	if (!autodo_priv_in_scope(priv))
+		return (AUTODO_SCOPE_DENY);
+	return (AUTODO_GRANT);
+}
+
+static int
+autodo_probing(struct thread *td)
+{
+	struct autodo_probe_bucket *b;
+	struct autodo_probe *p;
+	int found;
+
+	b = AUTODO_PROBE_BUCKET(td);
+	found = 0;
+	mtx_lock(&b->apb_mtx);
+	LIST_FOREACH(p, &b->apb_list, ap_link) {
+		if (p->ap_td == td) {
+			found = 1;
+			break;
+		}
+	}
+	mtx_unlock(&b->apb_mtx);
+	return (found);
+}
+
+/*
+ * Returns 1 when cred can write directory dvp without an autodo grant
+ * (permissions, ACLs, or another policy).  dvp must be locked.
+ */
+static int
+autodo_dir_writable_unaided(struct ucred *cred, struct vnode *dvp)
+{
+	struct autodo_probe probe;
+	struct autodo_probe_bucket *b;
+	struct thread *td;
+	int error;
+
+	td = curthread;
+	probe.ap_td = td;
+	b = AUTODO_PROBE_BUCKET(td);
+	mtx_lock(&b->apb_mtx);
+	LIST_INSERT_HEAD(&b->apb_list, &probe, ap_link);
+	mtx_unlock(&b->apb_mtx);
+	atomic_add_int(&autodo_probe_count, 1);
+
+	error = VOP_ACCESS(dvp, VWRITE, cred, td);
+
+	atomic_subtract_int(&autodo_probe_count, 1);
+	mtx_lock(&b->apb_mtx);
+	LIST_REMOVE(&probe, ap_link);
+	mtx_unlock(&b->apb_mtx);
+	return (error == 0);
+}
+
+/*
+ * Substitute record for caller credential src or substitute subst (either
+ * may be NULL).
+ */
+static struct autodo_esc *
+autodo_esc_find(struct autodo_td *atd, struct ucred *src, struct ucred *subst)
+{
+	struct autodo_esc *esc;
+
+	SLIST_FOREACH(esc, &atd->at_esc, ae_link) {
+		if (esc->ae_src == src || esc->ae_cred == subst)
+			return (esc);
+	}
+	return (NULL);
+}
+
+/*
+ * Map a substitute installed on curthread back to its caller credential.
+ * Any other credential is returned unchanged.
+ */
+static struct ucred *
+autodo_esc_source(struct ucred *cred)
+{
+	struct autodo_td *atd;
+	struct autodo_esc *esc;
+
+	if (autodo_esc_count == 0 || cred->cr_uid != 0)
+		return (cred);
+	atd = osd_thread_get(curthread, autodo_td_slot);
+	if (atd == NULL)
+		return (cred);
+	esc = autodo_esc_find(atd, NULL, cred);
+	return (esc != NULL ? esc->ae_src : cred);
+}
+
+/*
+ * Return curthread's substitute for src, creating it if needed.  Returns
+ * NULL once unload has begun.
+ */
+static struct ucred *
+autodo_esc_get(struct ucred *src)
+{
+	struct thread *td;
+	struct autodo_td *atd;
+	struct autodo_esc *esc;
+	struct uidinfo *uip;
+	void **rsv;
+
+	td = curthread;
+	atd = osd_thread_get(td, autodo_td_slot);
+	if (atd != NULL) {
+		esc = autodo_esc_find(atd, src, NULL);
+		if (esc != NULL)
+			return (esc->ae_cred);
+	}
+
+	mtx_lock(&autodo_esc_mtx);
+	if (autodo_esc_dying) {
+		mtx_unlock(&autodo_esc_mtx);
+		return (NULL);
+	}
+	autodo_esc_count++;
+	mtx_unlock(&autodo_esc_mtx);
+
+	esc = malloc(sizeof(*esc), M_AUTODO, M_WAITOK);
+	esc->ae_src = crhold(src);
+	esc->ae_cred = crdup(src);
+	uip = uifind(0);
+	change_euid(esc->ae_cred, uip);
+	uifree(uip);
+
+	if (atd == NULL) {
+		atd = malloc(sizeof(*atd), M_AUTODO, M_WAITOK);
+		SLIST_INIT(&atd->at_esc);
+		rsv = osd_reserve(autodo_td_slot);
+		(void)osd_thread_set_reserved(td, autodo_td_slot, rsv, atd);
+	}
+	SLIST_INSERT_HEAD(&atd->at_esc, esc, ae_link);
+	ast_sched(td, AUTODO_TDA);
+	return (esc->ae_cred);
+}
+
+/*
+ * Thread OSD destructor: runs on return to user mode (autodo_ast), thread
+ * destruction, and module unload.
+ */
+static void
+autodo_td_dtor(void *value)
+{
+	struct autodo_td *atd = value;
+	struct autodo_esc *esc;
+	u_int n;
+
+	n = 0;
+	while ((esc = SLIST_FIRST(&atd->at_esc)) != NULL) {
+		SLIST_REMOVE_HEAD(&atd->at_esc, ae_link);
+		crfree(esc->ae_cred);
+		crfree(esc->ae_src);
+		free(esc, M_AUTODO);
+		n++;
+	}
+	free(atd, M_AUTODO);
+	if (n != 0) {
+		mtx_lock(&autodo_esc_mtx);
+		autodo_esc_count -= n;
+		mtx_unlock(&autodo_esc_mtx);
+	}
+}
+
+/*
+ * AST on return to user mode: the system call that installed substitutes
+ * no longer references them.
+ */
+static void
+autodo_ast(struct thread *td, int tda __unused)
+{
+
+	osd_thread_del(td, autodo_td_slot);
+}
+
 /*
  * Check if the credential is subject to autodo management for the
  * purpose of the path deny list: non-root and holding a managed group
@@ -851,6 +1126,7 @@ autodo_cred_managed(struct ucred *cred)
 /*
  * Common gate for the path deny hooks: list non-empty, module enabled,
  * jail policy permits autodo, and the credential is autodo-managed.
+ * A creation substitute is judged as the caller it was copied from.
  */
 static int
 autodo_path_gate(struct ucred *cred)
@@ -858,6 +1134,7 @@ autodo_path_gate(struct ucred *cred)
 
 	if (!autodo_enabled || autodo_paths_count == 0)
 		return (0);
+	cred = autodo_esc_source(cred);
 	if (cred->cr_prison != &prison0 &&
 	    !autodo_jail_enabled(cred->cr_prison))
 		return (0);
@@ -1053,6 +1330,46 @@ autodo_vnode_check_setutimes(struct ucred *cred, struct vnode *vp __unused,
 }
 
 /*
+ * MAC hook: vnode_check_create
+ *
+ * Reached by open(O_CREAT), mkdir(2), mknod(2), mkfifo(2), symlink(2) and
+ * UNIX-domain bind(2) after lookup has authorized the create.  If cred
+ * could not write dvp without autodo, the object is created with
+ * cnp->cn_cred set to cred's euid 0 substitute.  vn_open_cred() retries
+ * with the same componentname after ERELOOKUP, so a substitute already in
+ * cn_cred is re-evaluated against the caller credential.
+ */
+static int
+autodo_vnode_check_create(struct ucred *cred, struct vnode *dvp,
+    struct label *dvplabel __unused, struct componentname *cnp,
+    struct vattr *vap __unused)
+{
+	struct autodo_td *atd;
+	struct autodo_esc *esc;
+	struct ucred *subst;
+
+	if (cnp->cn_cred != cred) {
+		atd = osd_thread_get(curthread, autodo_td_slot);
+		esc = atd != NULL ?
+		    autodo_esc_find(atd, NULL, cnp->cn_cred) : NULL;
+		if (esc == NULL || esc->ae_src != cred)
+			return (0);
+		cnp->cn_cred = cred;
+	}
+
+	if (cred->cr_uid == 0 ||
+	    autodo_priv_decide(cred, PRIV_VFS_WRITE) != AUTODO_GRANT ||
+	    autodo_dir_writable_unaided(cred, dvp))
+		return (0);
+
+	subst = autodo_esc_get(cred);
+	if (subst == NULL)
+		return (EACCES);	/* unloading: the grant is going away */
+	cnp->cn_cred = subst;
+	return (0);
+}
+
+/*
  * MAC hook: mac_priv_grant
  *
  * Called when the kernel is about to deny a privilege.  Returning 0 grants
@@ -1062,75 +1379,37 @@ autodo_vnode_check_setutimes(struct ucred *cred, struct vnode *vp __unused,
 static int
 autodo_priv_grant(struct ucred *cred, int priv)
 {
-	struct prison *pr;
-	int policy_count;
 
-	if (!autodo_enabled)
+	if (autodo_probe_count != 0 && autodo_probing(curthread))
 		return (EPERM);
 
-	/*
-	 * Check jail policy.  The host (prison0) is always governed by
-	 * the global 'enabled' sysctl above.  For jails, check per-jail
-	 * OSD configuration.
-	 */
-	pr = cred->cr_prison;
-	if (pr != &prison0 && !autodo_jail_enabled(pr))
-		return (EPERM);
-
-	/*
-	 * Multi-group policy path.  When the daemon has pushed a policy
-	 * (policy_count > 0), iterate the entries.  The first group whose
-	 * GID the credential holds and whose bitmap includes the privilege
-	 * wins the grant.  If no entry matches, fall through to deny.
-	 */
-	policy_count = autodo_policy_count;
-	if (policy_count > 0) {
-		int i;
-		for (i = 0; i < policy_count; i++) {
-			if (!autodo_cred_has_gid(cred,
-			    autodo_policy_entries[i].ape_gid))
-				continue;
-			if (!autodo_priv_in_bitmap(
-			    autodo_policy_entries[i].ape_bitmap, priv))
-				goto denied_by_scope;
-			goto granted;
+	switch (autodo_priv_decide(cred, priv)) {
+	case AUTODO_GRANT:
+		atomic_add_long(&autodo_grant_count, 1);
+		if (autodo_log_grants) {
+			autodo_emit_event(cred, priv, 1);
+			if (ratecheck(&autodo_log_lasttime,
+			    &(struct timeval){1, 0}))
+				printf("mac_do_auto: grant priv %d to uid %u "
+				    "(pid %d, %s)\n",
+				    priv, cred->cr_uid, curproc->p_pid,
+				    curproc->p_comm);
 		}
+		return (0);
+	case AUTODO_SCOPE_DENY:
+		if (autodo_log_grants)
+			autodo_emit_event(cred, priv, 0);
+		return (EPERM);
+	default:
 		return (EPERM);
 	}
-
-	/*
-	 * Legacy single-GID path (no daemon, manual sysctl use).
-	 */
-	if (!autodo_cred_has_gid(cred, (gid_t)autodo_gid))
-		return (EPERM);
-
-	if (!autodo_priv_in_scope(priv))
-		goto denied_by_scope;
-
-granted:
-	atomic_add_long(&autodo_grant_count, 1);
-
-	if (autodo_log_grants) {
-		autodo_emit_event(cred, priv, 1);
-		if (ratecheck(&autodo_log_lasttime, &(struct timeval){1, 0}))
-			printf("mac_do_auto: grant priv %d to uid %u "
-			    "(pid %d, %s)\n",
-			    priv, cred->cr_uid, curproc->p_pid,
-			    curproc->p_comm);
-	}
-
-	return (0);
-
-denied_by_scope:
-	if (autodo_log_grants)
-		autodo_emit_event(cred, priv, 0);
-	return (EPERM);
 }
 
 static void
 autodo_init(struct mac_policy_conf *mpc __unused)
 {
 	struct prison *pr;
+	int i;
 
 	/* Initialize scope bitmap to "all" (default). */
 	autodo_bitmap_fill(autodo_scope_bitmap);
@@ -1139,6 +1418,19 @@ autodo_init(struct mac_policy_conf *mpc __unused)
 	/* Initialize the path deny list (empty by default). */
 	sx_init(&autodo_paths_sx, "autodo paths");
 	autodo_paths_count = 0;
+
+	/* Escalated object creation state. */
+	mtx_init(&autodo_esc_mtx, "autodo esc", NULL, MTX_DEF);
+	autodo_esc_count = 0;
+	autodo_esc_dying = 0;
+	for (i = 0; i < AUTODO_PROBE_BUCKETS; i++) {
+		mtx_init(&autodo_probe_buckets[i].apb_mtx, "autodo probe",
+		    NULL, MTX_DEF);
+		LIST_INIT(&autodo_probe_buckets[i].apb_list);
+	}
+	autodo_probe_count = 0;
+	autodo_td_slot = osd_thread_register(autodo_td_dtor);
+	ast_register(AUTODO_TDA, ASTR_ASTF_REQUIRED, 0, autodo_ast);
 
 	/* Initialize ring buffer and chardev state. */
 	mtx_init(&autodo_ring_mtx, "autodo ring", NULL, MTX_DEF);
@@ -1190,8 +1482,19 @@ SYSINIT(autodo_cdev, SI_SUB_DEVFS, SI_ORDER_MIDDLE, autodo_cdev_init, NULL);
 static void
 autodo_destroy(struct mac_policy_conf *mpc __unused)
 {
+	int i;
 
 	osd_jail_deregister(autodo_osd_jail_slot);
+
+	/*
+	 * mac_do_auto_modevent() refused the unload while substitutes were
+	 * live and then stopped issuing them, so no thread uses one here.
+	 */
+	ast_deregister(AUTODO_TDA);
+	osd_thread_deregister(autodo_td_slot);
+	for (i = 0; i < AUTODO_PROBE_BUCKETS; i++)
+		mtx_destroy(&autodo_probe_buckets[i].apb_mtx);
+	mtx_destroy(&autodo_esc_mtx);
 
 	/*
 	 * Reject new opens and wake any thread sleeping in read(2).
@@ -1227,6 +1530,7 @@ static struct mac_policy_ops autodo_ops = {
 	.mpo_init = autodo_init,
 	.mpo_destroy = autodo_destroy,
 	.mpo_priv_grant = autodo_priv_grant,
+	.mpo_vnode_check_create = autodo_vnode_check_create,
 	.mpo_vnode_check_lookup = autodo_vnode_check_lookup,
 	.mpo_vnode_check_open = autodo_vnode_check_open,
 	.mpo_vnode_check_setflags = autodo_vnode_check_setflags,
@@ -1236,11 +1540,50 @@ static struct mac_policy_ops autodo_ops = {
 };
 
 /*
+ * EBUSY while a creation substitute is live.  Otherwise, when stop is set,
+ * no further substitutes are issued.
+ */
+static int
+autodo_esc_quiesce(int stop)
+{
+	int error;
+
+	mtx_lock(&autodo_esc_mtx);
+	error = autodo_esc_count != 0 ? EBUSY : 0;
+	if (error == 0 && stop)
+		autodo_esc_dying = 1;
+	mtx_unlock(&autodo_esc_mtx);
+	return (error);
+}
+
+static void
+autodo_esc_resume(void)
+{
+
+	mtx_lock(&autodo_esc_mtx);
+	autodo_esc_dying = 0;
+	mtx_unlock(&autodo_esc_mtx);
+}
+
+static void
+autodo_dev_resume(void)
+{
+
+	mtx_lock(&autodo_ring_mtx);
+	autodo_dev_dying = 0;
+	mtx_unlock(&autodo_ring_mtx);
+}
+
+/*
  * Custom modevent wrapping mac_policy_modevent().  Veto MOD_UNLOAD
  * while /dev/autodo is open so no file descriptor can be left pointing
  * at a cdevsw in unloaded module text; set autodo_dev_dying at quiesce
  * time so an open(2) racing the unload fails instead of establishing
  * a new fd against a device that is about to be destroyed.
+ *
+ * Unload is also refused while a creation substitute is live.  MOD_UNLOAD
+ * repeats that check and stops new substitutes, since a forced kldunload
+ * skips MOD_QUIESCE.
  */
 static int
 mac_do_auto_modevent(module_t mod, int type, void *data)
@@ -1254,14 +1597,20 @@ mac_do_auto_modevent(module_t mod, int type, void *data)
 		if (error == 0)
 			autodo_dev_dying = 1;
 		mtx_unlock(&autodo_ring_mtx);
+		if (error == 0 && (error = autodo_esc_quiesce(0)) != 0)
+			autodo_dev_resume();
 		return (error);
 	case MOD_UNLOAD:
+		error = autodo_esc_quiesce(1);
+		if (error != 0) {
+			autodo_dev_resume();
+			return (error);
+		}
 		error = mac_policy_modevent(mod, type, data);
 		if (error != 0) {
 			/* Unload aborted; the device stays usable. */
-			mtx_lock(&autodo_ring_mtx);
-			autodo_dev_dying = 0;
-			mtx_unlock(&autodo_ring_mtx);
+			autodo_dev_resume();
+			autodo_esc_resume();
 		}
 		return (error);
 	default:

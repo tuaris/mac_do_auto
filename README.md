@@ -58,6 +58,15 @@ whether the process holds the required privilege, `mac_do_auto` checks if the
 calling process belongs to the authorized group.  If so, it grants the
 privilege — the operation succeeds as if the process were running as root.
 
+Objects created through a grant are owned by root.  When a file, directory,
+FIFO, symlink or UNIX-domain socket is created in a directory the caller
+could not write without `mac_do_auto`, the `mac_vnode_check_create()` hook
+hands the filesystem a copy of the caller's credential with an effective
+UID of 0, so the result matches running the command under `doas`.  The
+copy lives only until that system call returns.  Creates that ordinary
+permissions already allow keep the caller's ownership, and renames or hard
+links never change an existing object's owner.
+
 ## Path Deny List
 
 An optional global deny list protects path prefixes from autodo-elevated
