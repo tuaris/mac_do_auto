@@ -185,9 +185,25 @@ echo "[10] Character device (/dev/autodo)"
 assert_success "test -c /dev/autodo" "/dev/autodo exists"
 assert_success "test -r /dev/autodo" "/dev/autodo readable by wheel"
 
+# --- Test: Ownership of escalated creates ---
+echo ""
+echo "[11] Ownership of escalated creates"
+CREATE_DIR=$(doas mktemp -d /tmp/autodo-create-XXXXXX)
+doas chmod 0755 "$CREATE_DIR"
+OWN_FILE="/tmp/autodo-create-own-$$"
+assert_success "touch $CREATE_DIR/file" "create in root-owned directory succeeds"
+assert_success "test \"\$(stat -f %u $CREATE_DIR/file)\" = 0" \
+    "file created through a grant is owned by root"
+assert_success "mkdir $CREATE_DIR/dir && test \"\$(stat -f %u $CREATE_DIR/dir)\" = 0" \
+    "directory created through a grant is owned by root"
+assert_success "touch $OWN_FILE && test \"\$(stat -f %u $OWN_FILE)\" = \"\$(id -u)\"" \
+    "file created in a writable directory keeps caller ownership"
+rm -f "$OWN_FILE"
+doas rm -rf "$CREATE_DIR"
+
 # --- Test: Multi-group policy via daemon ---
 echo ""
-echo "[11] Multi-group policy"
+echo "[12] Multi-group policy"
 DAEMON_PATH="${DAEMON_PATH:-$(dirname "$0")/../daemon/zig-out/bin/autodo-eventd}"
 PROFILE_DIR="$(dirname "$0")/../config/profiles"
 if [ -x "$DAEMON_PATH" ] && [ -d "$PROFILE_DIR" ]; then
@@ -266,7 +282,7 @@ fi
 
 # --- Test: Module unload ---
 echo ""
-echo "[12] Module unload"
+echo "[13] Module unload"
 doas kldunload mac_do_auto
 assert_success "! kldstat -q -m mac_do_auto" "module unloaded"
 assert_fail "cat $TEST_FILE" "access denied after unload"

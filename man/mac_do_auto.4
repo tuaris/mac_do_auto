@@ -1,4 +1,4 @@
-.Dd August 23, 2026
+.Dd September 11, 2026
 .Dt MAC_DO_AUTO 4
 .Os
 .Sh NAME
@@ -133,10 +133,30 @@ relative paths from inside a denied directory, operations on file
 descriptors opened before the deny, and path aliases (hard links)
 are not covered.
 Denials are logged, rate-limited, to the kernel message buffer.
+.Sh CREATED OBJECTS
+A file, directory, FIFO, symbolic link, or
+.Ux Ns -domain
+socket created in a directory the caller could not write without
+.Nm
+is owned by root, as if it had been created under
+.Xr mdo 1
+or
+.Xr doas 1 .
+The filesystem receives a copy of the caller's credential with an
+effective user ID of 0 for that create only; the copy is released when
+the system call returns.
+The group is inherited from the directory as usual.
+Objects created where ordinary permissions already allow the write keep
+the caller's ownership, and
+.Xr rename 2
+or
+.Xr link 2
+never change an existing object's owner.
 .Sh UNLOADING
 The module refuses to unload while
 .Pa /dev/autodo
-is open
+is open, or while a system call holding a creation credential has not
+yet returned
 .Pq Dv EBUSY .
 Close the daemon and any other consumers before running
 .Xr kldunload 8 .
