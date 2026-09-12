@@ -178,18 +178,6 @@ autodo_bitmap_set(volatile uint64_t *bitmap, int priv)
 	bitmap[word] |= (1UL << bit);
 }
 
-static inline void
-autodo_bitmap_clear(volatile uint64_t *bitmap, int priv)
-{
-	unsigned word, bit;
-
-	if (priv <= 0 || priv >= AUTODO_BITMAP_BITS)
-		return;
-	word = (unsigned)priv / 64;
-	bit = (unsigned)priv % 64;
-	bitmap[word] &= ~(1UL << bit);
-}
-
 static void
 autodo_bitmap_fill(volatile uint64_t *bitmap)
 {
