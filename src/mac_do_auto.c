@@ -787,14 +787,14 @@ autodo_jail_enabled(struct prison *pr)
 
 /*
  * Check if the credential includes the authorized GID in any position:
- * real GID, effective GID (cr_groups[0]), or supplementary groups.
+ * real GID, effective GID (cr_gid), or supplementary groups (cr_groups).
  */
 static int
 autodo_cred_has_gid(struct ucred *cred, gid_t gid)
 {
 	int i;
 
-	if (cred->cr_rgid == gid)
+	if (cred->cr_gid == gid || cred->cr_rgid == gid)
 		return (1);
 	for (i = 0; i < cred->cr_ngroups; i++) {
 		if (cred->cr_groups[i] == gid)
