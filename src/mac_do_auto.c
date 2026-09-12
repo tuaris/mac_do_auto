@@ -189,8 +189,12 @@ autodo_bitmap_fill(volatile uint64_t *bitmap)
 
 /*
  * Privilege categories for the 'scope' sysctl.
- * Each category maps to a range of priv(9) constants.  The ranges must
- * match priv_categories in daemon/src/main.zig.
+ * Categories map to ranges of priv(9) constants, and a category may hold
+ * several ranges.  Every PRIV_* constant belongs to exactly one category,
+ * so naming every category grants what "all" grants; the daemon's zig
+ * test checks that against <sys/priv.h>.  The ranges must match
+ * priv_categories in daemon/src/main.zig, which
+ * tests/kern_scope_test.sh compares against this table.
  */
 #define	AUTODO_CAT_SYSTEM	0x0001
 #define	AUTODO_CAT_AUDIT	0x0002
@@ -207,26 +211,33 @@ autodo_bitmap_fill(volatile uint64_t *bitmap)
 #define	AUTODO_CAT_ALL		0x0FFF
 
 struct autodo_priv_range {
-	int	start;
-	int	end;	/* inclusive */
+	uint32_t	cat;
+	int		start;
+	int		end;	/* inclusive */
 };
 
 static const struct autodo_priv_range autodo_cat_ranges[] = {
-	[0]  = { 2, 18 },	/* SYSTEM: ACCT..SETTIMEOFDAY */
-	[1]  = { 40, 44 },	/* AUDIT */
-	[2]  = { 50, 62 },	/* CRED */
-	[3]  = { 80, 92 },	/* DEBUG + DTRACE */
-	[4]  = { 110, 112 },	/* JAIL */
-	[5]  = { 130, 141 },	/* KLD + MAC */
-	[6]  = { 160, 242 },	/* PROC: PROC,IPC,MQ,PMC,SCHED,SEM,SIGNAL,SYSCTL */
-	[7]  = { 310, 345 },	/* VFS */
-	[8]  = { 360, 364 },	/* VM */
-	[9]  = { 370, 380 },	/* DEV: DEVFS,RANDOM */
-	[10] = { 390, 540 },	/* NET: all networking */
-	[11] = { 550, 710 },	/* MISC: MODULE,KMEM,RCTL,VERIEXEC,VMM,etc */
+	{ AUTODO_CAT_SYSTEM, 2, 18 },	/* ACCT..SETTIMEOFDAY */
+	{ AUTODO_CAT_SYSTEM, 100, 100 },	/* FIRMWARE_LOAD */
+	{ AUTODO_CAT_SYSTEM, 120, 121 },	/* KENV_SET, KENV_UNSET */
+	{ AUTODO_CAT_AUDIT, 40, 44 },
+	{ AUTODO_CAT_CRED, 50, 62 },
+	{ AUTODO_CAT_DEBUG, 80, 92 },	/* DEBUG + DTRACE */
+	{ AUTODO_CAT_JAIL, 110, 112 },
+	{ AUTODO_CAT_KLD, 130, 141 },	/* KLD + MAC */
+	{ AUTODO_CAT_PROC, 160, 243 },	/* PROC,IPC,MQ,PMC,SCHED,SEM,SIGNAL,SYSCTL */
+	{ AUTODO_CAT_VFS, 270, 273 },	/* UFS */
+	{ AUTODO_CAT_VFS, 280, 282 },	/* ZFS */
+	{ AUTODO_CAT_VFS, 290, 291 },	/* NFS */
+	{ AUTODO_CAT_VFS, 310, 345 },	/* VFS */
+	{ AUTODO_CAT_VM, 360, 364 },
+	{ AUTODO_CAT_DEV, 250, 256 },	/* TTY */
+	{ AUTODO_CAT_DEV, 370, 380 },	/* DEVFS, RANDOM */
+	{ AUTODO_CAT_NET, 390, 540 },	/* all networking */
+	{ AUTODO_CAT_MISC, 550, 710 },	/* MODULE,KMEM,RCTL,VERIEXEC,VMM,etc */
 };
 
-#define	AUTODO_NUM_CATS	(sizeof(autodo_cat_ranges) / sizeof(autodo_cat_ranges[0]))
+#define	AUTODO_NUM_RANGES	nitems(autodo_cat_ranges)
 
 /*
  * Rebuild the scope bitmap from a category bitmask.
@@ -245,8 +256,8 @@ autodo_rebuild_bitmap(uint32_t cats)
 		return;
 	}
 
-	for (i = 0; i < (int)AUTODO_NUM_CATS; i++) {
-		if (!(cats & (1U << i)))
+	for (i = 0; i < (int)AUTODO_NUM_RANGES; i++) {
+		if ((cats & autodo_cat_ranges[i].cat) == 0)
 			continue;
 		for (p = autodo_cat_ranges[i].start;
 		    p <= autodo_cat_ranges[i].end; p++)

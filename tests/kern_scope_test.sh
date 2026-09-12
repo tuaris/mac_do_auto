@@ -180,7 +180,33 @@ scope_restore_cleanup() {
 	unload_module
 }
 
+# --- the kernel and daemon category tables agree ---
+
+atf_test_case category_tables_match
+category_tables_match_head() {
+	atf_set "descr" "The kernel and daemon privilege category tables are identical"
+}
+category_tables_match_body() {
+	src="$(atf_get_srcdir)/../src/mac_do_auto.c"
+	zig="$(atf_get_srcdir)/../daemon/src/main.zig"
+	[ -f "${src}" ] || atf_skip "kernel source not available"
+	[ -f "${zig}" ] || atf_skip "daemon source not available"
+
+	sed -n 's/.*AUTODO_CAT_\([A-Z]*\), *\([0-9]*\), *\([0-9]*\).*/\1 \2 \3/p' \
+	    "${src}" | tr 'A-Z' 'a-z' | sort > kernel_ranges
+	sed -n 's/.*\.name = "\([a-z]*\)", *\.start = \([0-9]*\), *\.end = \([0-9]*\).*/\1 \2 \3/p' \
+	    "${zig}" | sort > daemon_ranges
+
+	if [ ! -s kernel_ranges ]; then
+		atf_fail "no category ranges found in ${src}"
+	fi
+	if ! diff -u kernel_ranges daemon_ranges > table_diff 2>&1; then
+		atf_fail "category tables differ: $(cat table_diff)"
+	fi
+}
+
 atf_init_test_cases() {
+	atf_add_test_case category_tables_match
 	atf_add_test_case scope_default
 	atf_add_test_case scope_vfs_grants
 	atf_add_test_case scope_vfs_denies_jail
