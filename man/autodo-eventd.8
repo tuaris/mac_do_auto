@@ -8,6 +8,7 @@
 .Nm
 .Op Fl Fl config Ns = Ns Ar path
 .Op Fl Fl log Ns = Ns Ar path
+.Op Fl Fl check-abi
 .Sh DESCRIPTION
 .Nm
 manages the runtime policy of the
@@ -26,6 +27,20 @@ The daemon runs in the foreground; the
 .Pa autodo_eventd
 rc script supervises it with
 .Xr daemon 8 .
+.Pp
+At startup it reads the module's ABI version and exits if it differs from
+its own.
+The ioctl commands carry their parameter size, so a change to the
+interface changes the command numbers: a daemon paired with a module from
+another release would fail every policy push and leave the kernel with
+whatever policy it already had, which in legacy mode is the default scope
+.Dq all .
+Package upgrades replace the files but leave the previous module resident,
+so reload it with
+.Xr kldunload 8
+and
+.Xr kldload 8 ,
+or reboot.
 .Sh OPTIONS
 .Bl -tag -width indent
 .It Fl Flconfig Ns = Ns Ar path
@@ -36,6 +51,9 @@ Configuration file
 Audit log file
 (default:
 .Pa /var/log/autodo/events.json ) .
+.It Fl Fl check-abi
+Report whether the loaded module's ABI matches this daemon, then exit.
+Useful after a package upgrade to confirm the module was reloaded.
 .It Fl Fl help
 Print usage and exit.
 .El

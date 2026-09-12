@@ -63,6 +63,10 @@ const AUTODO_SET_POLICY = autodoIoc(IOC_IN, 4, AutodoPolicy);
 const AUTODO_GET_POLICY = autodoIoc(IOC_OUT, 5, AutodoPolicy);
 const AUTODO_SET_PATHS = autodoIoc(IOC_IN, 6, AutodoPathlist);
 const AUTODO_GET_PATHS = autodoIoc(IOC_OUT, 7, AutodoPathlist);
+const AUTODO_GET_VERSION = autodoIoc(IOC_OUT, 8, u32);
+
+// Must match AUTODO_ABI_VERSION in src/autodo.h.
+const AUTODO_ABI_VERSION: u32 = 1;
 
 const default_config_path = "/usr/local/etc/autodo/autodo.conf";
 const default_log_path = "/var/log/autodo/events.json";
@@ -386,19 +390,58 @@ fn clearPrivBit(bitmap: *[AUTODO_BITMAP_WORDS]u64, priv: u16) void {
 
 extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
 
+// ENOTTY from any of these means the resident module does not know the
+// command, which after a package upgrade means it predates this daemon.
+fn callIoctl(dev_fd: posix.fd_t, request: c_ulong, arg: *anyopaque, what: []const u8) !void {
+    const rc = ioctl(dev_fd, request, arg);
+    if (rc < 0) {
+        const err = std.c._errno().*;
+        if (err == @intFromEnum(posix.E.NOTTY))
+            log(.err, "{s}: the loaded mac_do_auto module does not know this command; reload it (kldunload/kldload) or reboot", .{what});
+        return error.IoctlFailed;
+    }
+}
+
 fn pushScope(dev_fd: posix.fd_t, scope: *AutodoScope) !void {
-    const rc = ioctl(dev_fd, AUTODO_SET_SCOPE, @as(*anyopaque, @ptrCast(scope)));
-    if (rc < 0) return error.IoctlFailed;
+    try callIoctl(dev_fd, AUTODO_SET_SCOPE, @ptrCast(scope), "SET_SCOPE");
 }
 
 fn pushPolicy(dev_fd: posix.fd_t, policy: *AutodoPolicy) !void {
-    const rc = ioctl(dev_fd, AUTODO_SET_POLICY, @as(*anyopaque, @ptrCast(policy)));
-    if (rc < 0) return error.IoctlFailed;
+    try callIoctl(dev_fd, AUTODO_SET_POLICY, @ptrCast(policy), "SET_POLICY");
 }
 
 fn pushPaths(dev_fd: posix.fd_t, paths: *AutodoPathlist) !void {
-    const rc = ioctl(dev_fd, AUTODO_SET_PATHS, @as(*anyopaque, @ptrCast(paths)));
-    if (rc < 0) return error.IoctlFailed;
+    try callIoctl(dev_fd, AUTODO_SET_PATHS, @ptrCast(paths), "SET_PATHS");
+}
+
+fn moduleAbiVersion(dev_fd: posix.fd_t) !u32 {
+    var version: u32 = 0;
+    const rc = ioctl(dev_fd, AUTODO_GET_VERSION, @as(*anyopaque, @ptrCast(&version)));
+    if (rc < 0) {
+        const err = std.c._errno().*;
+        if (err == @intFromEnum(posix.E.NOTTY)) return error.AbiTooOld;
+        return error.IoctlFailed;
+    }
+    return version;
+}
+
+// Fail closed: a mismatched pair would fail every policy push and leave
+// the kernel with whatever policy it already had, which in legacy mode is
+// the default scope "all" -- more permissive than the configuration asks
+// for, and reported only by a log line.
+fn checkAbi(dev_fd: posix.fd_t) !u32 {
+    const version = moduleAbiVersion(dev_fd) catch |err| {
+        if (err == error.AbiTooOld)
+            log(.err, "the loaded mac_do_auto module predates this daemon: it has no ABI query.  Reload it (kldunload/kldload) or reboot", .{})
+        else
+            log(.err, "cannot read the module ABI version: {s}", .{@errorName(err)});
+        return err;
+    };
+    if (version != AUTODO_ABI_VERSION) {
+        log(.err, "module ABI {d} does not match this daemon's {d}; reload the module (kldunload/kldload) or reboot", .{ version, AUTODO_ABI_VERSION });
+        return error.AbiMismatch;
+    }
+    return version;
 }
 
 const c_grp = @cImport({
@@ -792,6 +835,8 @@ pub fn main() !void {
     var config_path: [*:0]const u8 = default_config_path;
     var log_path: []const u8 = default_log_path;
 
+    var check_abi_only = false;
+
     var args = std.process.args();
     _ = args.skip(); // program name
     while (args.next()) |arg| {
@@ -799,6 +844,8 @@ pub fn main() !void {
             config_path = arg[9.. :0];
         } else if (std.mem.startsWith(u8, arg, "--log=")) {
             log_path = arg[6..];
+        } else if (std.mem.eql(u8, arg, "--check-abi")) {
+            check_abi_only = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             const help =
                 "usage: autodo-eventd [options]\n" ++
@@ -806,6 +853,7 @@ pub fn main() !void {
                 "Options:\n" ++
                 "  --config=PATH   Config file (default: " ++ default_config_path ++ ")\n" ++
                 "  --log=PATH      Audit log file (default: " ++ default_log_path ++ ")\n" ++
+                "  --check-abi     Check the loaded module's ABI and exit\n" ++
                 "  --help          Show this help\n";
             _ = posix.write(1, help) catch {};
             return;
@@ -818,6 +866,15 @@ pub fn main() !void {
         return err;
     };
     defer posix.close(dev_fd);
+
+    const abi = try checkAbi(dev_fd);
+    if (check_abi_only) {
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "module ABI {d} matches autodo-eventd\n", .{abi}) catch return;
+        _ = posix.write(1, msg) catch {};
+        return;
+    }
+    log(.debug, "module ABI {d}", .{abi});
 
     // Load and apply config
     if (loadConfig(config_path)) |cfg| {
@@ -1029,6 +1086,8 @@ test "ABI mirror matches src/autodo.h" {
     try expectEqual(@as(c_ulong, @intCast(c.AUTODO_GET_POLICY)), AUTODO_GET_POLICY);
     try expectEqual(@as(c_ulong, @intCast(c.AUTODO_SET_PATHS)), AUTODO_SET_PATHS);
     try expectEqual(@as(c_ulong, @intCast(c.AUTODO_GET_PATHS)), AUTODO_GET_PATHS);
+    try expectEqual(@as(c_ulong, @intCast(c.AUTODO_GET_VERSION)), AUTODO_GET_VERSION);
+    try expectEqual(@as(u32, c.AUTODO_ABI_VERSION), AUTODO_ABI_VERSION);
 }
 
 test "privilege names match <sys/priv.h>" {

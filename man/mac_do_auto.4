@@ -90,9 +90,15 @@ interface used by
 .Dv AUTODO_SET_POLICY / AUTODO_GET_POLICY
 (multi-group policy),
 .Dv AUTODO_SET_PATHS / AUTODO_GET_PATHS
-(path deny list), and
+(path deny list),
 .Dv AUTODO_FLUSH
-(discard pending events).
+(discard pending events), and
+.Dv AUTODO_GET_VERSION
+(the module's
+.Dv AUTODO_ABI_VERSION ,
+which
+.Xr autodo-eventd 8
+checks at startup).
 The programming interface is defined in
 .Pa src/autodo.h .
 .El

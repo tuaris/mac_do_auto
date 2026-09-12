@@ -9,6 +9,7 @@ atf_test_program{name='kern_policy_test.sh'}
 atf_test_program{name='kern_paths_test.sh'}
 atf_test_program{name='kern_create_test.sh'}
 atf_test_program{name='kern_kqueue_test.sh'}
+atf_test_program{name='kern_abi_test.sh'}
 atf_test_program{name='kern_stress_test.sh'}
 atf_test_program{name='kern_negative_test.sh'}
 atf_test_program{name='kern_egid_test.sh'}
