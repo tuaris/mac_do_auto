@@ -100,6 +100,9 @@ sh tests/run_tests.sh        # shell harness (uses doas)
 cd tests && doas kyua test   # full ATF suite
 ```
 
+`tests/kern_vmm_test.sh` also needs amd64, a loadable `vmm(4)` (hardware
+virtualization), and `cc(1)`; it skips when they are unavailable.
+
 CI runs the build and both suites on every push/PR via
 `.github/workflows/ci-freebsd.yml` (vmactions/freebsd-vm).
 
