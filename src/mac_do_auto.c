@@ -61,13 +61,18 @@
 #include "autodo.h"
 
 /*
- * Privilege scope bitmap.
- *
- * _PRIV_HIGHEST is 703, so we need ceil(703/64) = 11 uint64_t words.
+ * Every priv(9) constant needs a bitmap bit, and every ioctl parameter
+ * must fit the IOCPARM_MASK length field of the command encoding.
+ */
+CTASSERT(_PRIV_HIGHEST <= AUTODO_BITMAP_BITS);
+CTASSERT(sizeof(struct autodo_scope) <= IOCPARM_MASK);
+CTASSERT(sizeof(struct autodo_policy) <= IOCPARM_MASK);
+CTASSERT(sizeof(struct autodo_pathlist) <= IOCPARM_MASK);
+
+/*
+ * Privilege scope bitmap (legacy single-group mode).
  * A set bit means the privilege IS granted.  Default: all bits set ("all").
  */
-#define	AUTODO_BITMAP_BITS	(AUTODO_BITMAP_WORDS * 64)
-
 static volatile uint64_t autodo_scope_bitmap[AUTODO_BITMAP_WORDS];
 
 /*
@@ -145,7 +150,8 @@ autodo_bitmap_fill(volatile uint64_t *bitmap)
 
 /*
  * Privilege categories for the 'scope' sysctl.
- * Each category maps to a range of priv(9) constants.
+ * Each category maps to a range of priv(9) constants.  The ranges must
+ * match priv_categories in daemon/src/main.zig.
  */
 #define	AUTODO_CAT_SYSTEM	0x0001
 #define	AUTODO_CAT_AUDIT	0x0002
@@ -178,7 +184,7 @@ static const struct autodo_priv_range autodo_cat_ranges[] = {
 	[8]  = { 360, 364 },	/* VM */
 	[9]  = { 370, 380 },	/* DEV: DEVFS,RANDOM */
 	[10] = { 390, 540 },	/* NET: all networking */
-	[11] = { 550, 702 },	/* MISC: MODULE,KMEM,RCTL,VERIEXEC,etc */
+	[11] = { 550, 710 },	/* MISC: MODULE,KMEM,RCTL,VERIEXEC,VMM,etc */
 };
 
 #define	AUTODO_NUM_CATS	(sizeof(autodo_cat_ranges) / sizeof(autodo_cat_ranges[0]))

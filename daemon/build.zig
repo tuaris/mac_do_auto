@@ -43,11 +43,15 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_mod.addImport("ucl", ucl_mod);
+    // The ABI tests @cImport the kernel module's autodo.h.
+    test_mod.addIncludePath(b.path("../src"));
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    // Tests read ../config/profiles relative to the daemon directory.
+    run_unit_tests.setCwd(b.path("."));
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 }

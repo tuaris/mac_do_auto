@@ -13,10 +13,16 @@
 #include <sys/ioccom.h>
 
 /*
- * Privilege scope bitmap dimensions.
- * _PRIV_HIGHEST is 703, so ceil(703/64) = 11 words covers all privileges.
+ * Privilege bitmap dimensions: bit N is priv(9) constant N.
+ *
+ * The size is part of the ioctl ABI, so it is fixed with headroom above
+ * _PRIV_HIGHEST instead of being derived from the build host's
+ * <sys/priv.h>; a module and daemon built against different FreeBSD
+ * releases still agree on it.  The module does not compile if
+ * _PRIV_HIGHEST exceeds AUTODO_BITMAP_BITS.
  */
-#define	AUTODO_BITMAP_WORDS	11
+#define	AUTODO_BITMAP_WORDS	16
+#define	AUTODO_BITMAP_BITS	(AUTODO_BITMAP_WORDS * 64)
 #define	AUTODO_BITMAP_BYTES	(AUTODO_BITMAP_WORDS * 8)
 
 /*
@@ -50,7 +56,7 @@ struct autodo_scope {
 /*
  * Multi-group policy.
  * Each entry maps a GID to a privilege bitmap.
- * The daemon resolves group names, compiles templates/deny lists
+ * The daemon resolves group names, compiles profiles/deny lists
  * into bitmaps, and pushes the whole policy to the kernel.
  */
 #define	AUTODO_MAX_GROUPS	16
@@ -85,7 +91,7 @@ struct autodo_policy {
 #define	AUTODO_PATH_LEN		256
 
 struct autodo_pathlist {
-	uint32_t	apl_count;	/* active entries (0..64) */
+	uint32_t	apl_count;	/* active entries (0..16) */
 	uint32_t	apl_pad;
 	char		apl_paths[AUTODO_MAX_PATHS][AUTODO_PATH_LEN];
 };

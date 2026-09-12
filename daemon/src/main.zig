@@ -2,9 +2,14 @@ const std = @import("std");
 const ucl = @import("ucl");
 const posix = std.posix;
 
-const AUTODO_BITMAP_WORDS = 11;
+// Mirror of src/autodo.h.  `zig build test` checks these constants, the
+// struct layouts, and the ioctl numbers against the C header.
+const AUTODO_BITMAP_WORDS = 16;
+const AUTODO_BITMAP_BITS = AUTODO_BITMAP_WORDS * 64;
 const AUTODO_MAX_GROUPS = 16;
 const AUTODO_RING_SIZE = 1024;
+const AUTODO_MAX_PATHS = 16;
+const AUTODO_PATH_LEN = 256;
 
 const AutodoEvent = extern struct {
     ae_timestamp: u64,
@@ -33,24 +38,31 @@ const AutodoPolicy = extern struct {
     ap_entries: [AUTODO_MAX_GROUPS]AutodoPolicyEntry,
 };
 
-const AUTODO_SET_SCOPE: c_ulong = 0x80584101; // _IOW('A', 1, struct autodo_scope)  88 bytes
-const AUTODO_GET_SCOPE: c_ulong = 0x40584102; // _IOR('A', 2, struct autodo_scope)
-const AUTODO_FLUSH: c_ulong = 0x20004103; // _IO('A', 3)
-// _IOW('A', 4, struct autodo_policy) — sizeof = 8 + 16*96 = 1544 = 0x608
-const AUTODO_SET_POLICY: c_ulong = 0x86084104;
-// _IOW('A', 6, struct autodo_pathlist) — sizeof = 8 + 16*256 = 4104 = 0x1008
-const AUTODO_SET_PATHS: c_ulong = 0x90084106;
-const AUTODO_GET_PATHS: c_ulong = 0x50084107; // _IOR('A', 7, struct autodo_pathlist)
-
-const AUTODO_MAX_PATHS = 16;
-const AUTODO_PATH_LEN = 256;
-
 const AutodoPathlist = extern struct {
     apl_count: u32,
     apl_pad: u32,
     apl_paths: [AUTODO_MAX_PATHS][AUTODO_PATH_LEN]u8,
 };
-const AUTODO_GET_POLICY: c_ulong = 0x46084105;
+
+// <sys/ioccom.h> command encoding: direction | length << 16 | group << 8 | number.
+const IOCPARM_MASK = (1 << 13) - 1;
+const IOC_VOID: c_ulong = 0x20000000;
+const IOC_OUT: c_ulong = 0x40000000;
+const IOC_IN: c_ulong = 0x80000000;
+
+fn autodoIoc(comptime inout: c_ulong, comptime num: u8, comptime T: ?type) c_ulong {
+    const len: c_ulong = if (T) |t| @sizeOf(t) else 0;
+    if (len > IOCPARM_MASK) @compileError("ioctl parameter does not fit IOCPARM_MASK");
+    return inout | (len << 16) | (@as(c_ulong, 'A') << 8) | num;
+}
+
+const AUTODO_SET_SCOPE = autodoIoc(IOC_IN, 1, AutodoScope);
+const AUTODO_GET_SCOPE = autodoIoc(IOC_OUT, 2, AutodoScope);
+const AUTODO_FLUSH = autodoIoc(IOC_VOID, 3, null);
+const AUTODO_SET_POLICY = autodoIoc(IOC_IN, 4, AutodoPolicy);
+const AUTODO_GET_POLICY = autodoIoc(IOC_OUT, 5, AutodoPolicy);
+const AUTODO_SET_PATHS = autodoIoc(IOC_IN, 6, AutodoPathlist);
+const AUTODO_GET_PATHS = autodoIoc(IOC_OUT, 7, AutodoPathlist);
 
 const default_config_path = "/usr/local/etc/autodo/autodo.conf";
 const default_log_path = "/var/log/autodo/events.json";
@@ -63,6 +75,7 @@ const PrivCategory = struct {
     end: u16,
 };
 
+// Must match autodo_cat_ranges in src/mac_do_auto.c.
 const priv_categories = [_]PrivCategory{
     .{ .name = "system", .start = 2, .end = 18 },
     .{ .name = "audit", .start = 40, .end = 44 },
@@ -75,7 +88,7 @@ const priv_categories = [_]PrivCategory{
     .{ .name = "vm", .start = 360, .end = 364 },
     .{ .name = "dev", .start = 370, .end = 380 },
     .{ .name = "net", .start = 390, .end = 540 },
-    .{ .name = "misc", .start = 550, .end = 702 },
+    .{ .name = "misc", .start = 550, .end = 710 },
 };
 
 const PrivMapping = struct {
@@ -83,23 +96,31 @@ const PrivMapping = struct {
     value: u16,
 };
 
+// Every non-obsolete PRIV_* constant in FreeBSD 15.1 <sys/priv.h>, so that
+// deny lists resolve names independently of the build host's headers.
+// `zig build test` checks it against the build host's <sys/priv.h>.
 const priv_names = [_]PrivMapping{
     .{ .name = "PRIV_ACCT", .value = 2 },
     .{ .name = "PRIV_MAXFILES", .value = 3 },
     .{ .name = "PRIV_MAXPROC", .value = 4 },
     .{ .name = "PRIV_KTRACE", .value = 5 },
-    .{ .name = "PRIV_CLOCK_SETTIME", .value = 6 },
-    .{ .name = "PRIV_NFSD", .value = 7 },
-    .{ .name = "PRIV_ADJTIME", .value = 10 },
-    .{ .name = "PRIV_NTP_ADJTIME", .value = 11 },
-    .{ .name = "PRIV_SETHOSTNAME", .value = 14 },
-    .{ .name = "PRIV_SETHOSTID", .value = 15 },
-    .{ .name = "PRIV_SETDOMAINNAME", .value = 16 },
-    .{ .name = "PRIV_REBOOT", .value = 18 },
+    .{ .name = "PRIV_SETDUMPER", .value = 6 },
+    .{ .name = "PRIV_REBOOT", .value = 8 },
+    .{ .name = "PRIV_SWAPON", .value = 9 },
+    .{ .name = "PRIV_SWAPOFF", .value = 10 },
+    .{ .name = "PRIV_MSGBUF", .value = 11 },
+    .{ .name = "PRIV_IO", .value = 12 },
+    .{ .name = "PRIV_KEYBOARD", .value = 13 },
+    .{ .name = "PRIV_DRIVER", .value = 14 },
+    .{ .name = "PRIV_ADJTIME", .value = 15 },
+    .{ .name = "PRIV_NTP_ADJTIME", .value = 16 },
+    .{ .name = "PRIV_CLOCK_SETTIME", .value = 17 },
+    .{ .name = "PRIV_SETTIMEOFDAY", .value = 18 },
     .{ .name = "PRIV_AUDIT_CONTROL", .value = 40 },
-    .{ .name = "PRIV_AUDIT_GETAUDIT", .value = 41 },
-    .{ .name = "PRIV_AUDIT_SETAUDIT", .value = 42 },
-    .{ .name = "PRIV_AUDIT_SUBMIT", .value = 43 },
+    .{ .name = "PRIV_AUDIT_FAILSTOP", .value = 41 },
+    .{ .name = "PRIV_AUDIT_GETAUDIT", .value = 42 },
+    .{ .name = "PRIV_AUDIT_SETAUDIT", .value = 43 },
+    .{ .name = "PRIV_AUDIT_SUBMIT", .value = 44 },
     .{ .name = "PRIV_CRED_SETUID", .value = 50 },
     .{ .name = "PRIV_CRED_SETEUID", .value = 51 },
     .{ .name = "PRIV_CRED_SETGID", .value = 52 },
@@ -109,15 +130,24 @@ const priv_names = [_]PrivMapping{
     .{ .name = "PRIV_CRED_SETREGID", .value = 56 },
     .{ .name = "PRIV_CRED_SETRESUID", .value = 57 },
     .{ .name = "PRIV_CRED_SETRESGID", .value = 58 },
+    .{ .name = "PRIV_SEEOTHERGIDS", .value = 59 },
+    .{ .name = "PRIV_SEEOTHERUIDS", .value = 60 },
+    .{ .name = "PRIV_SEEJAILPROC", .value = 61 },
+    .{ .name = "PRIV_CRED_SETCRED", .value = 62 },
     .{ .name = "PRIV_DEBUG_DIFFCRED", .value = 80 },
     .{ .name = "PRIV_DEBUG_SUGID", .value = 81 },
     .{ .name = "PRIV_DEBUG_UNPRIV", .value = 82 },
+    .{ .name = "PRIV_DEBUG_DENIED", .value = 83 },
+    .{ .name = "PRIV_DEBUG_DIFFJAIL", .value = 84 },
     .{ .name = "PRIV_DTRACE_KERNEL", .value = 90 },
     .{ .name = "PRIV_DTRACE_PROC", .value = 91 },
     .{ .name = "PRIV_DTRACE_USER", .value = 92 },
+    .{ .name = "PRIV_FIRMWARE_LOAD", .value = 100 },
     .{ .name = "PRIV_JAIL_ATTACH", .value = 110 },
     .{ .name = "PRIV_JAIL_SET", .value = 111 },
     .{ .name = "PRIV_JAIL_REMOVE", .value = 112 },
+    .{ .name = "PRIV_KENV_SET", .value = 120 },
+    .{ .name = "PRIV_KENV_UNSET", .value = 121 },
     .{ .name = "PRIV_KLD_LOAD", .value = 130 },
     .{ .name = "PRIV_KLD_UNLOAD", .value = 131 },
     .{ .name = "PRIV_MAC_PARTITION", .value = 140 },
@@ -125,34 +155,196 @@ const priv_names = [_]PrivMapping{
     .{ .name = "PRIV_PROC_LIMIT", .value = 160 },
     .{ .name = "PRIV_PROC_SETLOGIN", .value = 161 },
     .{ .name = "PRIV_PROC_SETRLIMIT", .value = 162 },
-    .{ .name = "PRIV_SIGNAL_DIFFCRED", .value = 200 },
-    .{ .name = "PRIV_SIGNAL_SUGID", .value = 201 },
-    .{ .name = "PRIV_SYSCTL_WRITE", .value = 220 },
-    .{ .name = "PRIV_SYSCTL_WRITEJAIL", .value = 221 },
+    .{ .name = "PRIV_PROC_SETLOGINCLASS", .value = 163 },
+    .{ .name = "PRIV_IPC_READ", .value = 170 },
+    .{ .name = "PRIV_IPC_WRITE", .value = 171 },
+    .{ .name = "PRIV_IPC_ADMIN", .value = 172 },
+    .{ .name = "PRIV_IPC_MSGSIZE", .value = 173 },
+    .{ .name = "PRIV_MQ_ADMIN", .value = 180 },
+    .{ .name = "PRIV_PMC_MANAGE", .value = 190 },
+    .{ .name = "PRIV_PMC_SYSTEM", .value = 191 },
+    .{ .name = "PRIV_SCHED_DIFFCRED", .value = 200 },
+    .{ .name = "PRIV_SCHED_SETPRIORITY", .value = 201 },
+    .{ .name = "PRIV_SCHED_RTPRIO", .value = 202 },
+    .{ .name = "PRIV_SCHED_SETPOLICY", .value = 203 },
+    .{ .name = "PRIV_SCHED_SET", .value = 204 },
+    .{ .name = "PRIV_SCHED_SETPARAM", .value = 205 },
+    .{ .name = "PRIV_SCHED_CPUSET", .value = 206 },
+    .{ .name = "PRIV_SCHED_CPUSET_INTR", .value = 207 },
+    .{ .name = "PRIV_SCHED_IDPRIO", .value = 208 },
+    .{ .name = "PRIV_SCHED_DIFFJAIL", .value = 209 },
+    .{ .name = "PRIV_SEM_WRITE", .value = 220 },
+    .{ .name = "PRIV_SIGNAL_DIFFCRED", .value = 230 },
+    .{ .name = "PRIV_SIGNAL_SUGID", .value = 231 },
+    .{ .name = "PRIV_SIGNAL_DIFFJAIL", .value = 232 },
+    .{ .name = "PRIV_SYSCTL_DEBUG", .value = 240 },
+    .{ .name = "PRIV_SYSCTL_WRITE", .value = 241 },
+    .{ .name = "PRIV_SYSCTL_WRITEJAIL", .value = 242 },
+    .{ .name = "PRIV_SYSCTL_MEMLOCK", .value = 243 },
+    .{ .name = "PRIV_TTY_CONSOLE", .value = 250 },
+    .{ .name = "PRIV_TTY_DRAINWAIT", .value = 251 },
+    .{ .name = "PRIV_TTY_DTRWAIT", .value = 252 },
+    .{ .name = "PRIV_TTY_EXCLUSIVE", .value = 253 },
+    .{ .name = "PRIV_TTY_STI", .value = 255 },
+    .{ .name = "PRIV_TTY_SETA", .value = 256 },
+    .{ .name = "PRIV_UFS_EXTATTRCTL", .value = 270 },
+    .{ .name = "PRIV_UFS_QUOTAOFF", .value = 271 },
+    .{ .name = "PRIV_UFS_QUOTAON", .value = 272 },
+    .{ .name = "PRIV_UFS_SETUSE", .value = 273 },
+    .{ .name = "PRIV_ZFS_POOL_CONFIG", .value = 280 },
+    .{ .name = "PRIV_ZFS_INJECT", .value = 281 },
+    .{ .name = "PRIV_ZFS_JAIL", .value = 282 },
+    .{ .name = "PRIV_NFS_DAEMON", .value = 290 },
+    .{ .name = "PRIV_NFS_LOCKD", .value = 291 },
     .{ .name = "PRIV_VFS_READ", .value = 310 },
     .{ .name = "PRIV_VFS_WRITE", .value = 311 },
     .{ .name = "PRIV_VFS_ADMIN", .value = 312 },
     .{ .name = "PRIV_VFS_EXEC", .value = 313 },
     .{ .name = "PRIV_VFS_LOOKUP", .value = 314 },
-    .{ .name = "PRIV_VFS_CHFLAGS_DEV", .value = 315 },
-    .{ .name = "PRIV_VFS_CHOWN", .value = 316 },
-    .{ .name = "PRIV_VFS_CHROOT", .value = 317 },
-    .{ .name = "PRIV_VFS_FCHROOT", .value = 319 },
-    .{ .name = "PRIV_VFS_LINK", .value = 320 },
-    .{ .name = "PRIV_VFS_MOUNT", .value = 323 },
-    .{ .name = "PRIV_VFS_UNMOUNT", .value = 325 },
-    .{ .name = "PRIV_VFS_SETGID", .value = 327 },
-    .{ .name = "PRIV_VFS_STICKYDIR", .value = 329 },
-    .{ .name = "PRIV_VFS_STAT", .value = 331 },
-    .{ .name = "PRIV_VM_MLOCK", .value = 360 },
-    .{ .name = "PRIV_VM_MUNLOCK", .value = 361 },
+    .{ .name = "PRIV_VFS_BLOCKRESERVE", .value = 315 },
+    .{ .name = "PRIV_VFS_CHFLAGS_DEV", .value = 316 },
+    .{ .name = "PRIV_VFS_CHOWN", .value = 317 },
+    .{ .name = "PRIV_VFS_CHROOT", .value = 318 },
+    .{ .name = "PRIV_VFS_RETAINSUGID", .value = 319 },
+    .{ .name = "PRIV_VFS_EXCEEDQUOTA", .value = 320 },
+    .{ .name = "PRIV_VFS_EXTATTR_SYSTEM", .value = 321 },
+    .{ .name = "PRIV_VFS_FCHROOT", .value = 322 },
+    .{ .name = "PRIV_VFS_FHOPEN", .value = 323 },
+    .{ .name = "PRIV_VFS_FHSTAT", .value = 324 },
+    .{ .name = "PRIV_VFS_FHSTATFS", .value = 325 },
+    .{ .name = "PRIV_VFS_GENERATION", .value = 326 },
+    .{ .name = "PRIV_VFS_GETFH", .value = 327 },
+    .{ .name = "PRIV_VFS_GETQUOTA", .value = 328 },
+    .{ .name = "PRIV_VFS_LINK", .value = 329 },
+    .{ .name = "PRIV_VFS_MKNOD_BAD", .value = 330 },
+    .{ .name = "PRIV_VFS_MKNOD_DEV", .value = 331 },
+    .{ .name = "PRIV_VFS_MKNOD_WHT", .value = 332 },
+    .{ .name = "PRIV_VFS_MOUNT", .value = 333 },
+    .{ .name = "PRIV_VFS_MOUNT_OWNER", .value = 334 },
+    .{ .name = "PRIV_VFS_MOUNT_EXPORTED", .value = 335 },
+    .{ .name = "PRIV_VFS_MOUNT_PERM", .value = 336 },
+    .{ .name = "PRIV_VFS_MOUNT_SUIDDIR", .value = 337 },
+    .{ .name = "PRIV_VFS_MOUNT_NONUSER", .value = 338 },
+    .{ .name = "PRIV_VFS_SETGID", .value = 339 },
+    .{ .name = "PRIV_VFS_SETQUOTA", .value = 340 },
+    .{ .name = "PRIV_VFS_STICKYFILE", .value = 341 },
+    .{ .name = "PRIV_VFS_SYSFLAGS", .value = 342 },
+    .{ .name = "PRIV_VFS_UNMOUNT", .value = 343 },
+    .{ .name = "PRIV_VFS_STAT", .value = 344 },
+    .{ .name = "PRIV_VFS_READ_DIR", .value = 345 },
+    .{ .name = "PRIV_VM_MADV_PROTECT", .value = 360 },
+    .{ .name = "PRIV_VM_MLOCK", .value = 361 },
+    .{ .name = "PRIV_VM_MUNLOCK", .value = 362 },
+    .{ .name = "PRIV_VM_SWAP_NOQUOTA", .value = 363 },
+    .{ .name = "PRIV_VM_SWAP_NORLIMIT", .value = 364 },
     .{ .name = "PRIV_DEVFS_RULE", .value = 370 },
+    .{ .name = "PRIV_DEVFS_SYMLINK", .value = 371 },
+    .{ .name = "PRIV_RANDOM_RESEED", .value = 380 },
     .{ .name = "PRIV_NET_BRIDGE", .value = 390 },
-    .{ .name = "PRIV_NET_RAW", .value = 400 },
-    .{ .name = "PRIV_NET_ROUTE", .value = 410 },
-    .{ .name = "PRIV_NETINET_RAW", .value = 430 },
-    .{ .name = "PRIV_KMEM_READ", .value = 550 },
-    .{ .name = "PRIV_KMEM_WRITE", .value = 551 },
+    .{ .name = "PRIV_NET_GRE", .value = 391 },
+    .{ .name = "PRIV_NET_BPF", .value = 394 },
+    .{ .name = "PRIV_NET_RAW", .value = 395 },
+    .{ .name = "PRIV_NET_ROUTE", .value = 396 },
+    .{ .name = "PRIV_NET_TAP", .value = 397 },
+    .{ .name = "PRIV_NET_SETIFMTU", .value = 398 },
+    .{ .name = "PRIV_NET_SETIFFLAGS", .value = 399 },
+    .{ .name = "PRIV_NET_SETIFCAP", .value = 400 },
+    .{ .name = "PRIV_NET_SETIFNAME", .value = 401 },
+    .{ .name = "PRIV_NET_SETIFMETRIC", .value = 402 },
+    .{ .name = "PRIV_NET_SETIFPHYS", .value = 403 },
+    .{ .name = "PRIV_NET_SETIFMAC", .value = 404 },
+    .{ .name = "PRIV_NET_ADDMULTI", .value = 405 },
+    .{ .name = "PRIV_NET_DELMULTI", .value = 406 },
+    .{ .name = "PRIV_NET_HWIOCTL", .value = 407 },
+    .{ .name = "PRIV_NET_SETLLADDR", .value = 408 },
+    .{ .name = "PRIV_NET_ADDIFGROUP", .value = 409 },
+    .{ .name = "PRIV_NET_DELIFGROUP", .value = 410 },
+    .{ .name = "PRIV_NET_IFCREATE", .value = 411 },
+    .{ .name = "PRIV_NET_IFDESTROY", .value = 412 },
+    .{ .name = "PRIV_NET_ADDIFADDR", .value = 413 },
+    .{ .name = "PRIV_NET_DELIFADDR", .value = 414 },
+    .{ .name = "PRIV_NET_LAGG", .value = 415 },
+    .{ .name = "PRIV_NET_GIF", .value = 416 },
+    .{ .name = "PRIV_NET_SETIFVNET", .value = 417 },
+    .{ .name = "PRIV_NET_SETIFDESCR", .value = 418 },
+    .{ .name = "PRIV_NET_SETIFFIB", .value = 419 },
+    .{ .name = "PRIV_NET_VXLAN", .value = 420 },
+    .{ .name = "PRIV_NET_SETLANPCP", .value = 421 },
+    .{ .name = "PRIV_NET_SETVLANPCP", .value = 421 },
+    .{ .name = "PRIV_NET_OVPN", .value = 422 },
+    .{ .name = "PRIV_NET_ME", .value = 423 },
+    .{ .name = "PRIV_NET_WG", .value = 424 },
+    .{ .name = "PRIV_NET80211_VAP_GETKEY", .value = 440 },
+    .{ .name = "PRIV_NET80211_VAP_MANAGE", .value = 441 },
+    .{ .name = "PRIV_NET80211_VAP_SETMAC", .value = 442 },
+    .{ .name = "PRIV_NET80211_CREATE_VAP", .value = 443 },
+    .{ .name = "PRIV_NETATM_CFG", .value = 460 },
+    .{ .name = "PRIV_NETATM_ADD", .value = 461 },
+    .{ .name = "PRIV_NETATM_DEL", .value = 462 },
+    .{ .name = "PRIV_NETATM_SET", .value = 463 },
+    .{ .name = "PRIV_NETBLUETOOTH_RAW", .value = 470 },
+    .{ .name = "PRIV_NETGRAPH_CONTROL", .value = 480 },
+    .{ .name = "PRIV_NETGRAPH_TTY", .value = 481 },
+    .{ .name = "PRIV_NETINET_RESERVEDPORT", .value = 490 },
+    .{ .name = "PRIV_NETINET_IPFW", .value = 491 },
+    .{ .name = "PRIV_NETINET_DIVERT", .value = 492 },
+    .{ .name = "PRIV_NETINET_PF", .value = 493 },
+    .{ .name = "PRIV_NETINET_DUMMYNET", .value = 494 },
+    .{ .name = "PRIV_NETINET_CARP", .value = 495 },
+    .{ .name = "PRIV_NETINET_MROUTE", .value = 496 },
+    .{ .name = "PRIV_NETINET_RAW", .value = 497 },
+    .{ .name = "PRIV_NETINET_GETCRED", .value = 498 },
+    .{ .name = "PRIV_NETINET_ADDRCTRL6", .value = 499 },
+    .{ .name = "PRIV_NETINET_ND6", .value = 500 },
+    .{ .name = "PRIV_NETINET_SCOPE6", .value = 501 },
+    .{ .name = "PRIV_NETINET_ALIFETIME6", .value = 502 },
+    .{ .name = "PRIV_NETINET_IPSEC", .value = 503 },
+    .{ .name = "PRIV_NETINET_REUSEPORT", .value = 504 },
+    .{ .name = "PRIV_NETINET_SETHDROPTS", .value = 505 },
+    .{ .name = "PRIV_NETINET_BINDANY", .value = 506 },
+    .{ .name = "PRIV_NETINET_HASHKEY", .value = 507 },
+    .{ .name = "PRIV_NETINET_KTLSKEYS", .value = 508 },
+    .{ .name = "PRIV_NETNCP", .value = 530 },
+    .{ .name = "PRIV_NETSMB", .value = 540 },
+    .{ .name = "PRIV_VM86_INTCALL", .value = 550 },
+    .{ .name = "PRIV_PIPEBUF", .value = 560 },
+    .{ .name = "PRIV_MODULE0", .value = 600 },
+    .{ .name = "PRIV_MODULE1", .value = 601 },
+    .{ .name = "PRIV_MODULE2", .value = 602 },
+    .{ .name = "PRIV_MODULE3", .value = 603 },
+    .{ .name = "PRIV_MODULE4", .value = 604 },
+    .{ .name = "PRIV_MODULE5", .value = 605 },
+    .{ .name = "PRIV_MODULE6", .value = 606 },
+    .{ .name = "PRIV_MODULE7", .value = 607 },
+    .{ .name = "PRIV_MODULE8", .value = 608 },
+    .{ .name = "PRIV_MODULE9", .value = 609 },
+    .{ .name = "PRIV_MODULE10", .value = 610 },
+    .{ .name = "PRIV_MODULE11", .value = 611 },
+    .{ .name = "PRIV_MODULE12", .value = 612 },
+    .{ .name = "PRIV_MODULE13", .value = 613 },
+    .{ .name = "PRIV_MODULE14", .value = 614 },
+    .{ .name = "PRIV_MODULE15", .value = 615 },
+    .{ .name = "PRIV_DDB_CAPTURE", .value = 620 },
+    .{ .name = "PRIV_NNPFS_DEBUG", .value = 630 },
+    .{ .name = "PRIV_CPUCTL_WRMSR", .value = 640 },
+    .{ .name = "PRIV_CPUCTL_UPDATE", .value = 641 },
+    .{ .name = "PRIV_C4B_RESET_CTLR", .value = 650 },
+    .{ .name = "PRIV_C4B_TRACE", .value = 651 },
+    .{ .name = "PRIV_AFS_ADMIN", .value = 660 },
+    .{ .name = "PRIV_AFS_DAEMON", .value = 661 },
+    .{ .name = "PRIV_RCTL_GET_RACCT", .value = 670 },
+    .{ .name = "PRIV_RCTL_GET_RULES", .value = 671 },
+    .{ .name = "PRIV_RCTL_GET_LIMITS", .value = 672 },
+    .{ .name = "PRIV_RCTL_ADD_RULE", .value = 673 },
+    .{ .name = "PRIV_RCTL_REMOVE_RULE", .value = 674 },
+    .{ .name = "PRIV_KMEM_READ", .value = 680 },
+    .{ .name = "PRIV_KMEM_WRITE", .value = 681 },
+    .{ .name = "PRIV_PROC_MEM_WRITE", .value = 682 },
+    .{ .name = "PRIV_KDB_SET_BACKEND", .value = 690 },
+    .{ .name = "PRIV_VERIEXEC_DIRECT", .value = 700 },
+    .{ .name = "PRIV_VERIEXEC_NOVERIFY", .value = 701 },
+    .{ .name = "PRIV_VERIEXEC_CONTROL", .value = 702 },
+    .{ .name = "PRIV_VMM_PPTDEV", .value = 710 },
 };
 
 fn lookupPrivByName(name: []const u8) ?u16 {
@@ -335,6 +527,8 @@ fn parseScopeAndDeny(obj: ucl.Object) AutodoScope {
                 if (item.toString()) |s| {
                     if (lookupPrivByName(s)) |pval| {
                         clearPrivBit(&scope.as_bitmap, pval);
+                    } else {
+                        log(.warn, "unknown privilege in deny: {s}", .{s});
                     }
                 }
             }
@@ -797,4 +991,129 @@ pub fn main() !void {
     }
 
     log(.info, "shutdown complete", .{});
+}
+
+fn privBitSet(bitmap: [AUTODO_BITMAP_WORDS]u64, priv: u16) bool {
+    const bit: u6 = @intCast(priv % 64);
+    return (bitmap[priv / 64] >> bit) & 1 == 1;
+}
+
+test "ABI mirror matches src/autodo.h" {
+    const c = @cImport({
+        @cInclude("sys/types.h");
+        @cInclude("autodo.h");
+    });
+    const expectEqual = std.testing.expectEqual;
+
+    try expectEqual(c.AUTODO_BITMAP_WORDS, AUTODO_BITMAP_WORDS);
+    try expectEqual(c.AUTODO_BITMAP_BITS, AUTODO_BITMAP_BITS);
+    try expectEqual(c.AUTODO_MAX_GROUPS, AUTODO_MAX_GROUPS);
+    try expectEqual(c.AUTODO_RING_SIZE, AUTODO_RING_SIZE);
+    try expectEqual(c.AUTODO_MAX_PATHS, AUTODO_MAX_PATHS);
+    try expectEqual(c.AUTODO_PATH_LEN, AUTODO_PATH_LEN);
+
+    try expectEqual(@sizeOf(c.struct_autodo_event), @sizeOf(AutodoEvent));
+    try expectEqual(@offsetOf(c.struct_autodo_event, "ae_comm"), @offsetOf(AutodoEvent, "ae_comm"));
+    try expectEqual(@sizeOf(c.struct_autodo_scope), @sizeOf(AutodoScope));
+    try expectEqual(@sizeOf(c.struct_autodo_policy_entry), @sizeOf(AutodoPolicyEntry));
+    try expectEqual(@offsetOf(c.struct_autodo_policy_entry, "ape_bitmap"), @offsetOf(AutodoPolicyEntry, "ape_bitmap"));
+    try expectEqual(@sizeOf(c.struct_autodo_policy), @sizeOf(AutodoPolicy));
+    try expectEqual(@offsetOf(c.struct_autodo_policy, "ap_entries"), @offsetOf(AutodoPolicy, "ap_entries"));
+    try expectEqual(@sizeOf(c.struct_autodo_pathlist), @sizeOf(AutodoPathlist));
+    try expectEqual(@offsetOf(c.struct_autodo_pathlist, "apl_paths"), @offsetOf(AutodoPathlist, "apl_paths"));
+
+    try expectEqual(@as(c_ulong, @intCast(c.AUTODO_SET_SCOPE)), AUTODO_SET_SCOPE);
+    try expectEqual(@as(c_ulong, @intCast(c.AUTODO_GET_SCOPE)), AUTODO_GET_SCOPE);
+    try expectEqual(@as(c_ulong, @intCast(c.AUTODO_FLUSH)), AUTODO_FLUSH);
+    try expectEqual(@as(c_ulong, @intCast(c.AUTODO_SET_POLICY)), AUTODO_SET_POLICY);
+    try expectEqual(@as(c_ulong, @intCast(c.AUTODO_GET_POLICY)), AUTODO_GET_POLICY);
+    try expectEqual(@as(c_ulong, @intCast(c.AUTODO_SET_PATHS)), AUTODO_SET_PATHS);
+    try expectEqual(@as(c_ulong, @intCast(c.AUTODO_GET_PATHS)), AUTODO_GET_PATHS);
+}
+
+test "privilege names match <sys/priv.h>" {
+    // The comptime walk below visits every declaration the C headers export.
+    @setEvalBranchQuota(1_000_000);
+    const p = @cImport({
+        @cInclude("sys/types.h");
+        @cInclude("sys/priv.h");
+    });
+
+    // Table entries the build host defines carry the header's value.
+    inline for (priv_names) |pm| {
+        if (@hasDecl(p, pm.name)) {
+            errdefer std.debug.print("{s}: table has {d}\n", .{ pm.name, pm.value });
+            try std.testing.expectEqual(@as(u16, @intCast(@field(p, pm.name))), pm.value);
+        }
+    }
+
+    // Every PRIV_* constant the build host defines is in the table.
+    inline for (@typeInfo(p).@"struct".decls) |decl| {
+        if (comptime std.mem.startsWith(u8, decl.name, "PRIV_")) {
+            const v = @field(p, decl.name);
+            const T = @TypeOf(v);
+            if (comptime (@typeInfo(T) == .int or @typeInfo(T) == .comptime_int)) {
+                errdefer std.debug.print("{s} = {d} missing from priv_names\n", .{ decl.name, v });
+                const want: u16 = @intCast(v);
+                try std.testing.expectEqual(@as(?u16, want), lookupPrivByName(decl.name));
+            }
+        }
+    }
+
+    try std.testing.expect(p._PRIV_HIGHEST <= AUTODO_BITMAP_BITS);
+}
+
+test "categories fit the bitmap and misc covers PRIV_VMM_PPTDEV" {
+    for (priv_categories) |pc| {
+        try std.testing.expect(pc.start <= pc.end);
+        try std.testing.expect(pc.end < AUTODO_BITMAP_BITS);
+    }
+    for (priv_names) |pm| {
+        try std.testing.expect(pm.value < AUTODO_BITMAP_BITS);
+    }
+
+    const pptdev = lookupPrivByName("PRIV_VMM_PPTDEV").?;
+    try std.testing.expect(privBitSet(buildBitmap(&.{"all"}).as_bitmap, pptdev));
+    try std.testing.expect(privBitSet(buildBitmap(&.{"misc"}).as_bitmap, pptdev));
+    try std.testing.expect(!privBitSet(buildBitmap(&.{
+        "system", "audit", "cred", "debug", "jail", "kld",
+        "proc",   "vfs",   "vm",   "dev",   "net",
+    }).as_bitmap, pptdev));
+
+    var scope = buildBitmap(&.{"all"});
+    clearPrivBit(&scope.as_bitmap, pptdev);
+    try std.testing.expect(!privBitSet(scope.as_bitmap, pptdev));
+}
+
+test "stock profiles deny only known privileges" {
+    const profile_dir = "../config/profiles";
+    var dir = try std.fs.cwd().openDir(profile_dir, .{ .iterate = true });
+    defer dir.close();
+
+    var checked: usize = 0;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".conf")) continue;
+
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&path_buf, profile_dir ++ "/{s}", .{entry.name});
+        const parser = ucl.Parser.init(0) orelse return error.UclInit;
+        defer parser.deinit();
+        try std.testing.expect(parser.addFile(path));
+        const root = parser.getObject() orelse return error.UclParse;
+        defer ucl.unref(root);
+
+        if (root.lookup("deny")) |deny_obj| {
+            if (deny_obj.lookup("privileges")) |privs| {
+                var pit = privs.iterate();
+                while (pit.next()) |item| {
+                    const s = item.toString() orelse return error.NotAString;
+                    errdefer std.debug.print("{s}: unknown privilege {s}\n", .{ entry.name, s });
+                    try std.testing.expect(lookupPrivByName(s) != null);
+                }
+            }
+        }
+        checked += 1;
+    }
+    try std.testing.expect(checked > 0);
 }
