@@ -61,6 +61,12 @@ constants:
 .Li misc ,
 or
 .Li all .
+Every constant belongs to exactly one category:
+.Li vfs
+covers UFS, ZFS and NFS administration as well as the generic VFS
+privileges, and
+.Li dev
+covers the tty privileges alongside devfs and random.
 The
 .Va deny privileges
 list removes individual privileges, named as in

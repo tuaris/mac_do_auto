@@ -75,17 +75,24 @@ const PrivCategory = struct {
     end: u16,
 };
 
-// Must match autodo_cat_ranges in src/mac_do_auto.c.
+// Must match autodo_cat_ranges in src/mac_do_auto.c.  A category may hold
+// several ranges; every PRIV_* constant belongs to exactly one category.
 const priv_categories = [_]PrivCategory{
     .{ .name = "system", .start = 2, .end = 18 },
+    .{ .name = "system", .start = 100, .end = 100 },
+    .{ .name = "system", .start = 120, .end = 121 },
     .{ .name = "audit", .start = 40, .end = 44 },
     .{ .name = "cred", .start = 50, .end = 62 },
     .{ .name = "debug", .start = 80, .end = 92 },
     .{ .name = "jail", .start = 110, .end = 112 },
     .{ .name = "kld", .start = 130, .end = 141 },
-    .{ .name = "proc", .start = 160, .end = 242 },
+    .{ .name = "proc", .start = 160, .end = 243 },
+    .{ .name = "vfs", .start = 270, .end = 273 },
+    .{ .name = "vfs", .start = 280, .end = 282 },
+    .{ .name = "vfs", .start = 290, .end = 291 },
     .{ .name = "vfs", .start = 310, .end = 345 },
     .{ .name = "vm", .start = 360, .end = 364 },
+    .{ .name = "dev", .start = 250, .end = 256 },
     .{ .name = "dev", .start = 370, .end = 380 },
     .{ .name = "net", .start = 390, .end = 540 },
     .{ .name = "misc", .start = 550, .end = 710 },
@@ -1083,6 +1090,30 @@ test "categories fit the bitmap and misc covers PRIV_VMM_PPTDEV" {
     var scope = buildBitmap(&.{"all"});
     clearPrivBit(&scope.as_bitmap, pptdev);
     try std.testing.expect(!privBitSet(scope.as_bitmap, pptdev));
+}
+
+test "every privilege belongs to a category" {
+    for (priv_names) |pm| {
+        var found = false;
+        for (priv_categories) |pc| {
+            if (pm.value >= pc.start and pm.value <= pc.end) {
+                found = true;
+                break;
+            }
+        }
+        errdefer std.debug.print("{s} ({d}) is in no category\n", .{ pm.name, pm.value });
+        try std.testing.expect(found);
+    }
+
+    // Naming every category therefore grants what "all" grants.
+    const named = buildBitmap(&.{
+        "system", "audit", "cred", "debug", "jail", "kld",
+        "proc",   "vfs",   "vm",   "dev",   "net",  "misc",
+    });
+    for (priv_names) |pm| {
+        errdefer std.debug.print("{s} ({d}) is not granted by the named categories\n", .{ pm.name, pm.value });
+        try std.testing.expect(privBitSet(named.as_bitmap, pm.value));
+    }
 }
 
 test "stock profiles deny only known privileges" {
