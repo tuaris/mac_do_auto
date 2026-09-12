@@ -97,15 +97,26 @@ struct autodo_pathlist {
 };
 
 /*
+ * Version of the ioctl interface below.  The commands carry their
+ * parameter size, so changing any structure here changes the command
+ * numbers too, and a daemon paired with a module from another release
+ * fails every ioctl with ENOTTY.  Bump this on any change to the commands
+ * or the structures they carry; autodo-eventd(8) reads it at startup and
+ * refuses to run against a module that disagrees.
+ */
+#define	AUTODO_ABI_VERSION	1
+
+/*
  * ioctl commands on /dev/autodo.
  *
- * AUTODO_SET_SCOPE  — push a compiled privilege bitmap (legacy single-group)
- * AUTODO_GET_SCOPE  — read the current privilege bitmap (legacy)
- * AUTODO_FLUSH      — discard all pending events in the ring buffer
- * AUTODO_SET_POLICY — push a multi-group policy from daemon to kernel
- * AUTODO_GET_POLICY — read the current multi-group policy
- * AUTODO_SET_PATHS  — push the global path deny list from daemon to kernel
- * AUTODO_GET_PATHS  — read the current path deny list
+ * AUTODO_SET_SCOPE   — push a compiled privilege bitmap (legacy single-group)
+ * AUTODO_GET_SCOPE   — read the current privilege bitmap (legacy)
+ * AUTODO_FLUSH       — discard all pending events in the ring buffer
+ * AUTODO_SET_POLICY  — push a multi-group policy from daemon to kernel
+ * AUTODO_GET_POLICY  — read the current multi-group policy
+ * AUTODO_SET_PATHS   — push the global path deny list from daemon to kernel
+ * AUTODO_GET_PATHS   — read the current path deny list
+ * AUTODO_GET_VERSION — read the module's AUTODO_ABI_VERSION
  */
 #define	AUTODO_SET_SCOPE	_IOW('A', 1, struct autodo_scope)
 #define	AUTODO_GET_SCOPE	_IOR('A', 2, struct autodo_scope)
@@ -114,5 +125,6 @@ struct autodo_pathlist {
 #define	AUTODO_GET_POLICY	_IOR('A', 5, struct autodo_policy)
 #define	AUTODO_SET_PATHS	_IOW('A', 6, struct autodo_pathlist)
 #define	AUTODO_GET_PATHS	_IOR('A', 7, struct autodo_pathlist)
+#define	AUTODO_GET_VERSION	_IOR('A', 8, uint32_t)
 
 #endif /* _AUTODO_H_ */

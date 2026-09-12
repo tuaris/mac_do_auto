@@ -571,6 +571,10 @@ autodo_dev_ioctl(struct cdev *dev __unused, u_long cmd, caddr_t data,
 	int i;
 
 	switch (cmd) {
+	case AUTODO_GET_VERSION:
+		*(uint32_t *)data = AUTODO_ABI_VERSION;
+		return (0);
+
 	case AUTODO_SET_SCOPE:
 		scope = (struct autodo_scope *)data;
 		for (i = 0; i < AUTODO_BITMAP_WORDS; i++)
