@@ -63,7 +63,12 @@ or
 .Li all .
 The
 .Va deny privileges
-list removes individual privileges from the compiled scope.
+list removes individual privileges, named as in
+.In sys/priv.h
+(for example
+.Dv PRIV_VFS_MOUNT ) ,
+from the compiled scope.
+Unknown names are logged and ignored.
 .Pp
 When the
 .Va groups
