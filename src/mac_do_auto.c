@@ -692,13 +692,17 @@ autodo_dev_kqfilter(struct cdev *dev __unused, struct knote *kn)
 	}
 }
 
+/*
+ * knlist_init_mtx() binds the knlist lock to autodo_ring_mtx, so both
+ * kevent(2) registration and knote() call this with the mutex already
+ * held; locking it again would recurse on a non-recursive mutex.
+ */
 static int
 autodo_kqread(struct knote *kn, long hint __unused)
 {
 
-	mtx_lock(&autodo_ring_mtx);
+	mtx_assert(&autodo_ring_mtx, MA_OWNED);
 	kn->kn_data = autodo_ring_count * sizeof(struct autodo_event);
-	mtx_unlock(&autodo_ring_mtx);
 	return (kn->kn_data > 0);
 }
 
